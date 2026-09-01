@@ -1,9 +1,6 @@
 /**
- * Creates the first Master/Admin account so you can log in for the first time.
- * Run once after migrating: node db/seed-admin.js <username> <password> <full_name>
- *
- * Example:
- *   node db/seed-admin.js admin MyStrongPassword123 "Admin User"
+ * Creates the first Master/Admin account.
+ * Usage: node db/seed-admin.js <username> <password> <full_name>
  */
 require('dotenv').config();
 const bcrypt = require('bcryptjs');

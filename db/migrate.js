@@ -1,8 +1,6 @@
 /**
  * Very small migration runner: applies any .sql file in db/migrations
- * that hasn't been applied yet, in filename order. Tracks progress in
- * a `schema_migrations` table so re-running is safe.
- *
+ * that hasn't been applied yet, in filename order.
  * Usage: npm run migrate
  */
 require('dotenv').config();

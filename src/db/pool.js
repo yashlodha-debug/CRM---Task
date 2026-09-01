@@ -13,27 +13,18 @@ const pool = new Pool({
 });
 
 pool.on('error', (err) => {
-  // Prevents an idle client error from crashing the whole process
   console.error('Unexpected error on idle Postgres client', err);
 });
 
-/**
- * Run a query with automatic client release.
- */
 async function query(text, params) {
   return pool.query(text, params);
 }
 
 /**
  * Run a function inside a single transaction.
- * Usage:
- *   await withTransaction(async (client) => {
- *     await client.query('...');
- *   });
- *
- * This is the backbone of the "never lose a session" guarantee described
- * in the blueprint (section 6) — status update + session open/close +
- * history + sync_queue insert all happen atomically, or not at all.
+ * This is the backbone of the "never lose a session" guarantee -
+ * status update + session open/close + history + sync_queue insert
+ * all happen atomically, or not at all.
  */
 async function withTransaction(fn) {
   const client = await pool.connect();
