@@ -33,14 +33,15 @@ async function authenticate(req, res, next) {
 
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-    const { rows } = await query(
-      `select ls.id as login_session_id, ls.logout_time, ls.login_date_ist,
-              u.id, u.username, u.full_name, u.role, u.is_active
-       from login_sessions ls
-       join users u on u.id = ls.user_id
-       where ls.session_token_hash = $1`,
-      [tokenHash]
-    );
+const { rows } = await query(
+     `select ls.id as login_session_id, ls.logout_time,
+             ls.login_date_ist::text as login_date_ist,
+             u.id, u.username, u.full_name, u.role, u.is_active
+      from login_sessions ls
+      join users u on u.id = ls.user_id
+      where ls.session_token_hash = $1`,
+     [tokenHash]
+   );
 
     const record = rows[0];
 
