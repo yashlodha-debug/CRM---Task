@@ -4,6 +4,7 @@
  */
 const { query, withTransaction } = require('../db/pool');
 const { generateTaskUid } = require('../utils/taskUid');
+const { todayIST } = require('../utils/date');
 
 const WORKING_STATUS = 'Working On';
 
@@ -13,9 +14,19 @@ const WORKING_STATUS = 'Working On';
  * a task without a UID.
  */
 async function createTask(data, createdByUserId) {
+  if (!data.taskType || !data.relatedTo || !data.assignedUserId) {
+    throw Object.assign(
+      new Error('Task, Related To, and Assigned are required.'),
+      { statusCode: 400 }
+    );
+  }
+
   return withTransaction(async (client) => {
     const taskUid = await generateTaskUid(client);
     const initialStatus = data.status || 'Open';
+    // Mail date and Assign date default to today (IST) if not explicitly provided.
+    const mailDate = data.mailDate || todayIST();
+    const assignDate = data.assignDate || todayIST();
 
     const { rows } = await client.query(
       `insert into tasks (
@@ -28,8 +39,8 @@ async function createTask(data, createdByUserId) {
        ) returning *`,
       [
         taskUid,
-        data.mailDate || null,
-        data.assignDate || null,
+        mailDate,
+        assignDate,
         data.assignedUserId || null,
         data.taskType || null,
         data.relatedTo || null,
@@ -150,6 +161,21 @@ async function changeStatus(taskId, newStatus, comment, userId) {
   });
 }
 
+async function updateDashboardStatus(taskId, dashboardStatus, userId) {
+  return withTransaction(async (client) => {
+    const { rows } = await client.query(
+      `update tasks set dashboard_status = $1, updated_at = now() where id = $2 returning *`,
+      [dashboardStatus, taskId]
+    );
+    const task = rows[0];
+    if (!task) {
+      throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+    }
+    await enqueueSync(client, taskId, task.task_uid, 'update', task);
+    return task;
+  });
+}
+
 async function enqueueSync(client, taskId, taskUid, action, payload) {
   await client.query(
     `insert into sync_queue (entity_type, entity_id, task_uid, action, payload)
@@ -234,6 +260,7 @@ async function searchTasks(searchQuery) {
 module.exports = {
   createTask,
   changeStatus,
+  updateDashboardStatus,
   listMyTasks,
   listTeamTasks,
   getTaskDetail,

@@ -69,4 +69,40 @@ router.get('/me', authenticate, async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/session-info
+ * Login time + running working time for the current session - powers
+ * the "Login Time / Current Status / Working Time" dashboard stats.
+ * Working time = time since login, minus total break time today.
+ */
+router.get('/session-info', authenticate, async (req, res) => {
+  try {
+    const { rows } = await query(
+      `select ls.login_time,
+              coalesce(sum(bl.duration_seconds), 0) as total_break_seconds
+       from login_sessions ls
+       left join break_logs bl
+         on bl.login_session_id = ls.id and bl.duration_seconds is not null
+       where ls.id = $1
+       group by ls.id, ls.login_time`,
+      [req.loginSessionId]
+    );
+
+    const row = rows[0];
+    if (!row) {
+      return res.status(404).json({ error: 'Session not found.' });
+    }
+
+    const loginTime = row.login_time;
+    const totalBreakSeconds = Number(row.total_break_seconds);
+    const elapsedSeconds = Math.floor((Date.now() - new Date(loginTime).getTime()) / 1000);
+    const workingSeconds = Math.max(0, elapsedSeconds - totalBreakSeconds);
+
+    res.json({ loginTime, totalBreakSeconds, workingSeconds });
+  } catch (err) {
+    console.error('Session info error:', err);
+    res.status(500).json({ error: 'Failed to load session info.' });
+  }
+});
+
 module.exports = router;

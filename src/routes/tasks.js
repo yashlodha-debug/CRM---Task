@@ -102,4 +102,24 @@ router.patch('/:id/status', requirePermission('change_status'), async (req, res)
   }
 });
 
+/**
+ * PATCH /api/tasks/:id/dashboard-status
+ * Body: { dashboardStatus }
+ * Separate from the main status field - this is your existing sheet's
+ * "Dashboard Status" column (Done / Client side hold / Close / Under Process).
+ */
+router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status'), async (req, res) => {
+  try {
+    const { dashboardStatus } = req.body;
+    if (!dashboardStatus) {
+      return res.status(400).json({ error: 'dashboardStatus is required.' });
+    }
+    const updated = await taskService.updateDashboardStatus(req.params.id, dashboardStatus, req.user.id);
+    res.json(updated);
+  } catch (err) {
+    console.error('Update dashboard status error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to update dashboard status.' });
+  }
+});
+
 module.exports = router;

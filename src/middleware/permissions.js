@@ -44,3 +44,19 @@ function requirePermission(permissionKey) {
 }
 
 module.exports = { requirePermission };
+
+/**
+ * Simple role-gate for screens that are Master-only regardless of
+ * individual permissions (e.g. the Sync Monitor, User Management).
+ */
+function requireMaster(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Not authenticated.' });
+  }
+  if (req.user.role !== 'master') {
+    return res.status(403).json({ error: 'Master access required.' });
+  }
+  next();
+}
+
+module.exports.requireMaster = requireMaster;
