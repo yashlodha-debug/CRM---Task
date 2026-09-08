@@ -176,6 +176,153 @@ async function updateDashboardStatus(taskId, dashboardStatus, userId) {
   });
 }
 
+/**
+ * Item 2: general task detail edit - everything EXCEPT status and
+ * assignment, which have their own dedicated, more carefully-controlled
+ * functions (changeStatus / reassignTask) since those touch time-tracking
+ * sessions. Only fields actually provided in `updates` are changed.
+ */
+const EDITABLE_FIELDS = [
+  'mailDate', 'assignDate', 'taskType', 'relatedTo', 'exisData', 'restId',
+  'restName', 'emailSubject', 'recipesCount', 'rawCount', 'suggested', 'sla'
+];
+const FIELD_TO_COLUMN = {
+  mailDate: 'mail_date', assignDate: 'assign_date', taskType: 'task_type',
+  relatedTo: 'related_to', exisData: 'exis_data', restId: 'rest_id',
+  restName: 'rest_name', emailSubject: 'email_subject', recipesCount: 'recipes_count',
+  rawCount: 'raw_count', suggested: 'suggested', sla: 'sla'
+};
+
+async function updateTaskDetails(taskId, updates, userId) {
+  const providedFields = EDITABLE_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(updates, f));
+  if (providedFields.length === 0) {
+    throw Object.assign(new Error('No editable fields were provided.'), { statusCode: 400 });
+  }
+
+  return withTransaction(async (client) => {
+    const setClauses = providedFields.map((f, i) => `${FIELD_TO_COLUMN[f]} = $${i + 1}`);
+    const values = providedFields.map((f) => updates[f]);
+
+    const { rows } = await client.query(
+      `update tasks set ${setClauses.join(', ')}, updated_at = now()
+       where id = $${providedFields.length + 1}
+       returning *`,
+      [...values, taskId]
+    );
+    const task = rows[0];
+    if (!task) {
+      throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+    }
+
+    await client.query(
+      `insert into status_history (task_id, task_uid, user_id, previous_status, new_status, comment)
+       values ($1, $2, $3, $4, $4, $5)`,
+      [taskId, task.task_uid, userId, task.status, 'Task details edited.']
+    );
+
+    await enqueueSync(client, taskId, task.task_uid, 'update', task);
+    return task;
+  });
+}
+
+/**
+ * Item 2: reassign a task to a different user. If the task is currently
+ * "Working On", the open session is closed under the outgoing user - the
+ * clock does not silently keep running "owned" by someone the task is no
+ * longer assigned to. Work resumes fresh (a new session) only when
+ * someone actively sets it to Working On again.
+ */
+async function reassignTask(taskId, newAssignedUserId, userId, comment) {
+  if (!newAssignedUserId) {
+    throw Object.assign(new Error('newAssignedUserId is required.'), { statusCode: 400 });
+  }
+
+  return withTransaction(async (client) => {
+    const { rows: taskRows } = await client.query(`select * from tasks where id = $1 for update`, [taskId]);
+    const task = taskRows[0];
+    if (!task) {
+      throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+    }
+
+    if (task.status === WORKING_STATUS) {
+      await client.query(
+        `update status_sessions
+         set end_time = now(), duration_seconds = extract(epoch from (now() - start_time))::int
+         where task_id = $1 and end_time is null`,
+        [taskId]
+      );
+    }
+
+    // Recompute the cached total from the sessions themselves, same as
+    // changeStatus does - otherwise the just-closed session's time would
+    // be recorded in status_sessions but never reflected on tasks.duration_seconds.
+    const { rows: durationRows } = await client.query(
+      `select coalesce(sum(duration_seconds), 0) as total
+       from status_sessions
+       where task_id = $1 and status = $2 and end_time is not null`,
+      [taskId, WORKING_STATUS]
+    );
+    const totalDuration = durationRows[0].total;
+
+    const { rows: updatedRows } = await client.query(
+      `update tasks set assigned_user_id = $1, duration_seconds = $2, updated_at = now() where id = $3 returning *`,
+      [newAssignedUserId, totalDuration, taskId]
+    );
+    const updatedTask = updatedRows[0];
+
+    await client.query(
+      `insert into status_history (task_id, task_uid, user_id, previous_status, new_status, comment)
+       values ($1, $2, $3, $4, $4, $5)`,
+      [taskId, task.task_uid, userId, task.status, comment || 'Task reassigned.']
+    );
+
+    await enqueueSync(client, taskId, task.task_uid, 'update', updatedTask);
+    return updatedTask;
+  });
+}
+
+/**
+ * Item 2: permanently deletes a task and all its history/sessions
+ * (cascade, per the schema). Note: this does not remove the
+ * corresponding row from the Google Sheet mirror - the sheet is a
+ * one-way mirror and doesn't currently support delete syncing.
+ */
+async function deleteTask(taskId) {
+  const { rows } = await query(`delete from tasks where id = $1 returning id, task_uid`, [taskId]);
+  if (rows.length === 0) {
+    throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+  }
+  return { success: true, taskUid: rows[0].task_uid };
+}
+
+/**
+ * Item 4: dashboard summary counts. Scoped to a user if userId is given
+ * (for "My Tasks" cards), otherwise counts across the whole team.
+ */
+async function getSummary(userId) {
+  const whereClause = userId ? 'where assigned_user_id = $1' : '';
+  const params = userId ? [userId] : [];
+  const { rows } = await query(
+    `select
+       count(*) as total,
+       count(*) filter (where status = 'Working On') as working_on,
+       count(*) filter (where status = 'Pending') as pending,
+       count(*) filter (where status = 'Hold') as hold,
+       count(*) filter (where status = 'Done') as done
+     from tasks
+     ${whereClause}`,
+    params
+  );
+  const row = rows[0];
+  return {
+    total: Number(row.total),
+    workingOn: Number(row.working_on),
+    pending: Number(row.pending),
+    hold: Number(row.hold),
+    done: Number(row.done)
+  };
+}
+
 async function enqueueSync(client, taskId, taskUid, action, payload) {
   await client.query(
     `insert into sync_queue (entity_type, entity_id, task_uid, action, payload)
@@ -261,6 +408,10 @@ module.exports = {
   createTask,
   changeStatus,
   updateDashboardStatus,
+  updateTaskDetails,
+  reassignTask,
+  deleteTask,
+  getSummary,
   listMyTasks,
   listTeamTasks,
   getTaskDetail,

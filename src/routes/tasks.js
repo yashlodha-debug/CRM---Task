@@ -3,6 +3,7 @@ const router = express.Router();
 const taskService = require('../services/taskService');
 const { authenticate } = require('../middleware/auth');
 const { requirePermission } = require('../middleware/permissions');
+const { query } = require('../db/pool');
 
 // Every route below requires a valid login first.
 router.use(authenticate);
@@ -68,6 +69,23 @@ router.get('/search', requirePermission('view_team_tasks'), async (req, res) => 
 });
 
 /**
+ * GET /api/tasks/summary?scope=mine|team
+ * Item 4: dashboard summary card counts (Total, Working On, Pending, Hold, Done).
+ * Registered before the generic /:id route so "summary" is never mistaken
+ * for a task id.
+ */
+router.get('/summary', async (req, res) => {
+  try {
+    const scope = req.query.scope === 'mine' ? req.user.id : null;
+    const summary = await taskService.getSummary(scope);
+    res.json(summary);
+  } catch (err) {
+    console.error('Get summary error:', err);
+    res.status(500).json({ error: 'Failed to load summary.' });
+  }
+});
+
+/**
  * GET /api/tasks/:id
  * Full task details including Status History and Working Session History.
  */
@@ -119,6 +137,65 @@ router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status
   } catch (err) {
     console.error('Update dashboard status error:', err);
     res.status(err.statusCode || 500).json({ error: err.message || 'Failed to update dashboard status.' });
+  }
+});
+
+/**
+ * PATCH /api/tasks/:id
+ * Item 2: edit general task details (everything except status/assignment).
+ * Requires the 'edit_task_details' permission.
+ */
+router.patch('/:id', requirePermission('edit_task_details'), async (req, res) => {
+  try {
+    const updated = await taskService.updateTaskDetails(req.params.id, req.body, req.user.id);
+    res.json(updated);
+  } catch (err) {
+    console.error('Update task details error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to update task.' });
+  }
+});
+
+/**
+ * PATCH /api/tasks/:id/reassign
+ * Item 2: change who a task is assigned to. Requires EITHER
+ * 'change_assigned' or 'reassign_task' - Master can grant whichever
+ * makes sense for a given user; both permission keys unlock this same
+ * underlying action.
+ */
+router.patch('/:id/reassign', async (req, res, next) => {
+  // Custom two-permission check: either one is sufficient.
+  if (req.user.role === 'master') return next();
+  const { rows } = await query(
+    `select permission_key from user_permissions
+     where user_id = $1 and permission_key in ('change_assigned', 'reassign_task') and enabled = true`,
+    [req.user.id]
+  );
+  if (rows.length === 0) {
+    return res.status(403).json({ error: 'You don\'t have permission to reassign tasks.' });
+  }
+  next();
+}, async (req, res) => {
+  try {
+    const { assignedUserId, comment } = req.body;
+    const updated = await taskService.reassignTask(req.params.id, assignedUserId, req.user.id, comment);
+    res.json(updated);
+  } catch (err) {
+    console.error('Reassign task error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to reassign task.' });
+  }
+});
+
+/**
+ * DELETE /api/tasks/:id
+ * Item 2: permanently delete a task. Requires the 'delete_task' permission.
+ */
+router.delete('/:id', requirePermission('delete_task'), async (req, res) => {
+  try {
+    const result = await taskService.deleteTask(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error('Delete task error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to delete task.' });
   }
 });
 

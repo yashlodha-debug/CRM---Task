@@ -73,6 +73,44 @@ function formatDuration(seconds) {
   return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+/** DD/MM/YYYY, matching the existing sheet's date columns - no time portion. */
+function formatDateOnly(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-GB', { timeZone: 'Asia/Kolkata' });
+}
+
+/** e.g. "6:25:10 PM", matching the existing sheet's Start/End Time columns. */
+function formatTimeOnly(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: true
+  });
+}
+
+const FIELD_FORMATTERS = {
+  duration_seconds: formatDuration,
+  mail_date: formatDateOnly,
+  assign_date: formatDateOnly,
+  start_time: formatTimeOnly,
+  end_time: formatTimeOnly
+};
+
+// Fields forced to plain text (a leading apostrophe tells Sheets "store
+// this exactly as typed, never auto-convert it"). Without this, Sheets'
+// USER_ENTERED parsing sometimes reinterprets a date/time-looking string
+// as its own internal date serial number, which then displays as a raw
+// number like "46151" on any cell that doesn't already have a Date format
+// applied - a real inconsistency we saw happen on freshly-touched rows.
+const FORCE_PLAIN_TEXT_FIELDS = new Set(['mail_date', 'assign_date', 'start_time', 'end_time', 'duration_seconds']);
+
 function buildRowArray(headerMap, task) {
   const width = Math.max(...Object.values(headerMap)) + 1;
   const row = new Array(width).fill('');
@@ -81,8 +119,15 @@ function buildRowArray(headerMap, task) {
     if (!(header in headerMap)) continue; // sheet doesn't have this column - skip it
     const idx = headerMap[header];
     let value = task[field];
-    if (field === 'duration_seconds') value = formatDuration(value);
-    row[idx] = value === null || value === undefined ? '' : String(value);
+    const formatter = FIELD_FORMATTERS[field];
+    if (formatter) {
+      value = formatter(value);
+    }
+    let finalValue = value === null || value === undefined ? '' : String(value);
+    if (finalValue && FORCE_PLAIN_TEXT_FIELDS.has(field)) {
+      finalValue = `'${finalValue}`;
+    }
+    row[idx] = finalValue;
   }
 
   return row;
@@ -114,7 +159,7 @@ async function syncTask(task) {
     throw new Error('Google Sheets sync is not configured yet.');
   }
 
-  const sheets = getSheetsClient();
+  const sheets = await getSheetsClient();
   const headerMap = await getHeaderMap(sheets);
   const rowArray = buildRowArray(headerMap, task);
   const lastCol = colLetter(rowArray.length - 1);
@@ -133,7 +178,13 @@ async function syncTask(task) {
       spreadsheetId: SHEET_ID,
       range: `${TAB_NAME}!A1`,
       valueInputOption: 'USER_ENTERED',
-      insertDataOption: 'INSERT_ROWS',
+      // OVERWRITE finds the next actually-empty row after your existing
+      // data and writes into it directly - it does NOT insert a brand-new
+      // row and push everything below it down. INSERT_ROWS was the actual
+      // cause of the dropdowns/formatting appearing to vanish: it was
+      // inserting fresh, blank rows right after the header, shoving your
+      // pre-formatted template rows further down the sheet each time.
+      insertDataOption: 'OVERWRITE',
       requestBody: { values: [rowArray] }
     });
   }

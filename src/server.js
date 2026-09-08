@@ -12,6 +12,8 @@ const taskRoutes = require('./routes/tasks');
 const userRoutes = require('./routes/users');
 const breakRoutes = require('./routes/breaks');
 const syncRoutes = require('./routes/sync');
+const adminRoutes = require('./routes/admin');
+const dropdownRoutes = require('./routes/dropdowns');
 const breakService = require('./services/breakService');
 const syncWorker = require('./services/syncWorker');
 const { isConfigured: sheetsConfigured } = require('./services/sheetsClient');
@@ -32,6 +34,8 @@ app.use('/api/tasks', taskRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/breaks', breakRoutes);
 app.use('/api/sync', syncRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/dropdowns', dropdownRoutes);
 
 // Catch-all error handler (keeps the server from crashing on unexpected errors)
 app.use((err, req, res, next) => {

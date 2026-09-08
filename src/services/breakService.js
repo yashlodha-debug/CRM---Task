@@ -21,6 +21,21 @@ async function startBreak(userId, loginSessionId, breakType) {
     throw Object.assign(new Error('Invalid break type.'), { statusCode: 400 });
   }
 
+  // Enforced here (not just as a disabled button in the UI) - a task
+  // actively "Working On" must be paused/finished before starting a
+  // break, otherwise its time-tracking clock would keep running while
+  // the person is genuinely away.
+  const { rows: workingRows } = await query(
+    `select count(*)::int as count from tasks where assigned_user_id = $1 and status = 'Working On'`,
+    [userId]
+  );
+  if (workingRows[0].count > 0) {
+    throw Object.assign(
+      new Error('You have a task marked "Working On". Pause or finish it before taking a break.'),
+      { statusCode: 409 }
+    );
+  }
+
   const { rows } = await query(
     `insert into break_logs (user_id, login_session_id, break_type, date_ist)
      values ($1, $2, $3, $4)
