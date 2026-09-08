@@ -20,7 +20,13 @@ const { isConfigured: sheetsConfigured } = require('./services/sheetsClient');
 
 const app = express();
 
-app.use(cors());
+app.use(cors({
+  origin: [
+    "https://crm-crm-frontend.vercel.app",
+    "http://localhost:5173"
+  ],
+  credentials: true
+}));
 app.use(express.json());
 
 // Simple health check - confirms the server is running at all,
