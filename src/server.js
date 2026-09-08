@@ -21,10 +21,13 @@ const { isConfigured: sheetsConfigured } = require('./services/sheetsClient');
 const app = express();
 
 app.use(cors({
-  origin: [
-    "https://crm-crm-frontend.vercel.app",
-    "http://localhost:5173"
-  ],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true); // allow non-browser requests (e.g. health checks)
+    const allowed =
+      origin === 'http://localhost:5173' ||
+      /^https:\/\/crm-crm-frontend[a-z0-9-]*\.vercel\.app$/.test(origin);
+    callback(null, allowed);
+  },
   credentials: true
 }));
 app.use(express.json());

@@ -20,6 +20,12 @@ async function createTask(data, createdByUserId) {
       { statusCode: 400 }
     );
   }
+  if (!data.restId || !String(data.restId).trim() || !data.emailSubject || !String(data.emailSubject).trim()) {
+    throw Object.assign(
+      new Error('RID and Email Subject are required.'),
+      { statusCode: 400 }
+    );
+  }
 
   return withTransaction(async (client) => {
     const taskUid = await generateTaskUid(client);
@@ -299,8 +305,20 @@ async function deleteTask(taskId) {
  * Item 4: dashboard summary counts. Scoped to a user if userId is given
  * (for "My Tasks" cards), otherwise counts across the whole team.
  */
-async function getSummary(userId) {
-  const whereClause = userId ? 'where assigned_user_id = $1' : '';
+/**
+ * Item 4: current-month scoping. Normal users only see tasks created
+ * this calendar month (IST); Master always sees everything. A task
+ * currently "Working On" is always included regardless of age, so an
+ * older in-progress task never silently disappears from someone's view
+ * mid-work (which would also break the break-blocking logic in Item 5/6).
+ */
+function monthScopeClause(isMaster, alias = 't') {
+  if (isMaster) return '';
+  return `and ((${alias}.created_at at time zone 'Asia/Kolkata') >= date_trunc('month', now() at time zone 'Asia/Kolkata') or ${alias}.status = 'Working On')`;
+}
+
+async function getSummary(userId, isMaster) {
+  const whereClause = userId ? 'where t.assigned_user_id = $1' : 'where true';
   const params = userId ? [userId] : [];
   const { rows } = await query(
     `select
@@ -309,8 +327,9 @@ async function getSummary(userId) {
        count(*) filter (where status = 'Pending') as pending,
        count(*) filter (where status = 'Hold') as hold,
        count(*) filter (where status = 'Done') as done
-     from tasks
-     ${whereClause}`,
+     from tasks t
+     ${whereClause}
+     ${monthScopeClause(isMaster)}`,
     params
   );
   const row = rows[0];
@@ -331,23 +350,26 @@ async function enqueueSync(client, taskId, taskUid, action, payload) {
   );
 }
 
-async function listMyTasks(userId) {
+async function listMyTasks(userId, isMaster) {
   const { rows } = await query(
     `select t.*, u.full_name as assigned_full_name
      from tasks t
      left join users u on u.id = t.assigned_user_id
      where t.assigned_user_id = $1
+     ${monthScopeClause(isMaster)}
      order by t.created_at desc`,
     [userId]
   );
   return rows;
 }
 
-async function listTeamTasks() {
+async function listTeamTasks(isMaster) {
   const { rows } = await query(
     `select t.*, u.full_name as assigned_full_name
      from tasks t
      left join users u on u.id = t.assigned_user_id
+     where true
+     ${monthScopeClause(isMaster)}
      order by t.created_at desc`
   );
   return rows;
@@ -385,18 +407,19 @@ async function getTaskDetail(taskId) {
   return { ...task, statusHistory: history, sessions };
 }
 
-async function searchTasks(searchQuery) {
+async function searchTasks(searchQuery, isMaster) {
   const { rows } = await query(
     `select t.*, u.full_name as assigned_full_name
      from tasks t
      left join users u on u.id = t.assigned_user_id
-     where t.task_uid ilike $1
+     where (t.task_uid ilike $1
         or t.rest_id ilike $1
         or t.rest_name ilike $1
         or t.email_subject ilike $1
         or t.task_type ilike $1
         or t.related_to ilike $1
-        or u.full_name ilike $1
+        or u.full_name ilike $1)
+     ${monthScopeClause(isMaster)}
      order by t.created_at desc
      limit 50`,
     [`%${searchQuery}%`]

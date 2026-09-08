@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const adminService = require('../services/adminService');
 const dropdownService = require('../services/dropdownService');
+const activityService = require('../services/activityService');
 const { authenticate } = require('../middleware/auth');
 const { requireMaster } = require('../middleware/permissions');
 
@@ -132,6 +133,22 @@ router.delete('/dropdowns/:id', async (req, res) => {
   } catch (err) {
     console.error('Delete dropdown option error:', err);
     res.status(err.statusCode || 500).json({ error: err.message || 'Failed to delete option.' });
+  }
+});
+
+/**
+ * GET /api/admin/users/:id/activity
+ * Item 3: complete login/logout/break history for one user, for Master
+ * to review - first login ever, every session, and every break within
+ * each session, plus running totals.
+ */
+router.get('/users/:id/activity', async (req, res) => {
+  try {
+    const history = await activityService.getUserActivityHistory(req.params.id);
+    res.json(history);
+  } catch (err) {
+    console.error('Get user activity error:', err);
+    res.status(500).json({ error: 'Failed to load activity history.' });
   }
 });
 

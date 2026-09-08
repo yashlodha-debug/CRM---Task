@@ -28,7 +28,7 @@ router.post('/', requirePermission('create_task'), async (req, res) => {
  */
 router.get('/mine', requirePermission('view_my_tasks'), async (req, res) => {
   try {
-    const tasks = await taskService.listMyTasks(req.user.id);
+    const tasks = await taskService.listMyTasks(req.user.id, req.user.role === 'master');
     res.json(tasks);
   } catch (err) {
     console.error('List my tasks error:', err);
@@ -43,7 +43,7 @@ router.get('/mine', requirePermission('view_my_tasks'), async (req, res) => {
  */
 router.get('/team', requirePermission('view_team_tasks'), async (req, res) => {
   try {
-    const tasks = await taskService.listTeamTasks();
+    const tasks = await taskService.listTeamTasks(req.user.role === 'master');
     res.json(tasks);
   } catch (err) {
     console.error('List team tasks error:', err);
@@ -60,7 +60,7 @@ router.get('/search', requirePermission('view_team_tasks'), async (req, res) => 
   try {
     const q = (req.query.q || '').trim();
     if (!q) return res.json([]);
-    const results = await taskService.searchTasks(q);
+    const results = await taskService.searchTasks(q, req.user.role === 'master');
     res.json(results);
   } catch (err) {
     console.error('Search error:', err);
@@ -77,7 +77,7 @@ router.get('/search', requirePermission('view_team_tasks'), async (req, res) => 
 router.get('/summary', async (req, res) => {
   try {
     const scope = req.query.scope === 'mine' ? req.user.id : null;
-    const summary = await taskService.getSummary(scope);
+    const summary = await taskService.getSummary(scope, req.user.role === 'master');
     res.json(summary);
   } catch (err) {
     console.error('Get summary error:', err);

@@ -47,8 +47,10 @@ async function startBreak(userId, loginSessionId, breakType) {
 
 /**
  * Ends the current break, and checks whether the user has now exceeded
- * their daily break limit. If so, force-logs-out the session immediately
- * and reports that back to the caller so the frontend can react.
+ * their daily break limit - scoped to the whole calendar day across ALL
+ * of the user's login sessions today, not just this one session. (If
+ * scoped per-session, someone could reset their break allowance simply
+ * by logging out and back in - not the intended "55 minutes per day".)
  */
 async function endBreak(userId, loginSessionId) {
   return withTransaction(async (client) => {
@@ -68,8 +70,8 @@ async function endBreak(userId, loginSessionId) {
     const { rows: totalRows } = await client.query(
       `select coalesce(sum(duration_seconds), 0) as total
        from break_logs
-       where login_session_id = $1 and date_ist = $2 and duration_seconds is not null`,
-      [loginSessionId, todayIST()]
+       where user_id = $1 and date_ist = $2 and duration_seconds is not null`,
+      [userId, todayIST()]
     );
     const totalBreakSeconds = Number(totalRows[0].total);
 
@@ -97,8 +99,8 @@ async function getStatus(userId, loginSessionId) {
   const { rows: totalRows } = await query(
     `select coalesce(sum(duration_seconds), 0) as total
      from break_logs
-     where login_session_id = $1 and date_ist = $2 and duration_seconds is not null`,
-    [loginSessionId, todayIST()]
+     where user_id = $1 and date_ist = $2 and duration_seconds is not null`,
+    [userId, todayIST()]
   );
 
   return {
@@ -110,30 +112,25 @@ async function getStatus(userId, loginSessionId) {
 }
 
 /**
- * Safety-net sweep: called by the cron job. Finds every still-open login
- * session whose accumulated break time today has reached the limit, and
- * force-logs them out - covers the case where a user never clicks Resume.
+ * Safety-net sweep: called by the cron job. Finds every user whose
+ * accumulated break time today (across all their login sessions, plus
+ * any break still open) has reached the daily limit, and force-logs-out
+ * every open session they currently have.
  */
 async function sweepBreakLimitViolations() {
   const limitSeconds = breakLimitSeconds();
   const today = todayIST();
 
-  // Counts completed breaks normally, and for any break still open,
-  // counts its elapsed time so far - otherwise someone who starts a
-  // break and simply never clicks Resume would never get caught here,
-  // only on their next unrelated request (if any).
   const { rows } = await query(
-    `select ls.id as login_session_id,
+    `select bl.user_id,
             coalesce(sum(
               case when bl.break_end is not null then bl.duration_seconds
                    else extract(epoch from (now() - bl.break_start))::int
               end
             ), 0) as total_break_seconds
-     from login_sessions ls
-     left join break_logs bl
-       on bl.login_session_id = ls.id and bl.date_ist = $1
-     where ls.logout_time is null and ls.login_date_ist = $1
-     group by ls.id
+     from break_logs bl
+     where bl.date_ist = $1
+     group by bl.user_id
      having coalesce(sum(
               case when bl.break_end is not null then bl.duration_seconds
                    else extract(epoch from (now() - bl.break_start))::int
@@ -142,16 +139,19 @@ async function sweepBreakLimitViolations() {
     [today, limitSeconds]
   );
 
+  let closedCount = 0;
   for (const row of rows) {
-    await query(
+    const { rows: closed } = await query(
       `update login_sessions
        set logout_time = now(), logout_reason = 'break_limit'
-       where id = $1 and logout_time is null`,
-      [row.login_session_id]
+       where user_id = $1 and logout_time is null and login_date_ist = $2
+       returning id`,
+      [row.user_id, today]
     );
+    closedCount += closed.length;
   }
 
-  return rows.length;
+  return closedCount;
 }
 
 /**
