@@ -89,8 +89,8 @@ async function getUserActivityHistory(userId) {
   let totalWorkingSecondsAllTime = 0;
 
   for (const session of sessions) {
-    const { rows: breaks } = await query(
-      `select break_type, break_start, break_end, duration_seconds
+        const { rows: breaks } = await query(
+      `select id, break_type, break_start, break_end, duration_seconds
        from break_logs
        where login_session_id = $1
        order by break_start asc`,

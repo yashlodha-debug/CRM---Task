@@ -1,3 +1,4 @@
+const breakService = require('../services/breakService');
 const express = require('express');
 const router = express.Router();
 const adminService = require('../services/adminService');
@@ -152,4 +153,53 @@ router.get('/users/:id/activity', async (req, res) => {
   }
 });
 
+/** PATCH /api/admin/breaks/:id - edit type/timestamps of a break entry. */
+router.patch('/breaks/:id', async (req, res) => {
+  try {
+    const updated = await breakService.adminEditBreak(req.params.id, req.body);
+    res.json(updated);
+  } catch (err) {
+    console.error('Edit break error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to edit break.' });
+  }
+});
+
+/** DELETE /api/admin/breaks/:id - remove an incorrect break entry. */
+router.delete('/breaks/:id', async (req, res) => {
+  try {
+    const result = await breakService.adminDeleteBreak(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error('Delete break error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to delete break.' });
+  }
+});
+
+/** POST /api/admin/breaks/:id/end - end a forgotten break and log the user out. */
+router.post('/breaks/:id/end', async (req, res) => {
+  try {
+    const result = await breakService.adminForceEndBreak(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error('Force end break error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to end break.' });
+  }
+});
+
+/**
+ * GET /api/admin/breaks/today
+ * Item 1: team-wide break overview - every non-Master user's break count
+ * and total time today, plus whether they're currently on break.
+ */
+router.get('/breaks/today', async (req, res) => {
+  try {
+    const summary = await breakService.getTeamBreakSummary();
+    res.json(summary);
+  } catch (err) {
+    console.error('Get team break summary error:', err);
+    res.status(500).json({ error: 'Failed to load break summary.' });
+  }
+});
+
 module.exports = router;
+

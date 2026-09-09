@@ -171,4 +171,141 @@ async function sweepDayEnd() {
   return rows.length;
 }
 
-module.exports = { startBreak, endBreak, getStatus, sweepBreakLimitViolations, sweepDayEnd, breakLimitSeconds };
+async function adminEditBreak(breakId, updates) {
+  const { rows: existingRows } = await query(`select * from break_logs where id = $1`, [breakId]);
+  const existing = existingRows[0];
+  if (!existing) {
+    throw Object.assign(new Error('Break entry not found.'), { statusCode: 404 });
+  }
+
+  const fields = [];
+  const values = [];
+  let i = 1;
+
+  if (updates.breakType !== undefined) {
+    if (!['lunch', 'tea', 'short'].includes(updates.breakType)) {
+      throw Object.assign(new Error('Invalid break type.'), { statusCode: 400 });
+    }
+    fields.push(`break_type = $${i++}`);
+    values.push(updates.breakType);
+  }
+  if (updates.breakStart !== undefined) {
+    fields.push(`break_start = $${i++}`);
+    values.push(updates.breakStart);
+  }
+  if (updates.breakEnd !== undefined) {
+    fields.push(`break_end = $${i++}`);
+    values.push(updates.breakEnd);
+  }
+  if (fields.length === 0) {
+    throw Object.assign(new Error('No fields to update.'), { statusCode: 400 });
+  }
+
+  const newStart = updates.breakStart !== undefined ? updates.breakStart : existing.break_start;
+  const newEnd = updates.breakEnd !== undefined ? updates.breakEnd : existing.break_end;
+  if (newEnd && new Date(newEnd) <= new Date(newStart)) {
+    throw Object.assign(new Error('Break end must be after break start.'), { statusCode: 400 });
+  }
+
+  fields.push(`duration_seconds = $${i++}`);
+  values.push(newEnd ? Math.round((new Date(newEnd) - new Date(newStart)) / 1000) : null);
+
+  values.push(breakId);
+  const { rows } = await query(
+    `update break_logs set ${fields.join(', ')} where id = $${i} returning *`,
+    values
+  );
+  return rows[0];
+}
+
+async function adminDeleteBreak(breakId) {
+  const { rows } = await query(`delete from break_logs where id = $1 returning id`, [breakId]);
+  if (rows.length === 0) {
+    throw Object.assign(new Error('Break entry not found.'), { statusCode: 404 });
+  }
+  return { success: true };
+}
+
+async function adminForceEndBreak(breakId) {
+  return withTransaction(async (client) => {
+    const { rows: breakRows } = await client.query(
+      `update break_logs
+       set break_end = now(),
+           duration_seconds = extract(epoch from (now() - break_start))::int
+       where id = $1 and break_end is null
+       returning *`,
+      [breakId]
+    );
+    const brk = breakRows[0];
+    if (!brk) {
+      throw Object.assign(new Error('This break is not currently active.'), { statusCode: 400 });
+    }
+
+    await client.query(
+      `update login_sessions
+       set logout_time = now(), logout_reason = 'master_forced'
+       where id = $1 and logout_time is null`,
+      [brk.login_session_id]
+    );
+
+    return { break: brk, loggedOut: true };
+  });
+}
+
+async function getTeamBreakSummary() {
+  const today = todayIST();
+
+  const { rows: totals } = await query(
+    `select
+       u.id as user_id,
+       u.full_name,
+       u.username,
+       count(bl.id) filter (where bl.date_ist = $1) as breaks_today,
+       coalesce(sum(
+         case when bl.date_ist = $1 then
+           case when bl.break_end is not null then bl.duration_seconds
+                else extract(epoch from (now() - bl.break_start))::int
+           end
+         else 0 end
+       ), 0) as total_break_seconds_today
+     from users u
+     left join break_logs bl on bl.user_id = u.id
+     where u.role != 'master'
+     group by u.id, u.full_name, u.username
+     order by u.full_name asc`,
+    [today]
+  );
+
+  const { rows: openBreaks } = await query(
+    `select id, user_id, break_type, break_start
+     from break_logs
+     where break_end is null`
+  );
+  const openByUser = new Map(openBreaks.map((b) => [b.user_id, b]));
+
+  return totals.map((row) => {
+    const open = openByUser.get(row.user_id);
+    return {
+      userId: row.user_id,
+      fullName: row.full_name,
+      username: row.username,
+      breaksToday: Number(row.breaks_today),
+      totalBreakSecondsToday: Number(row.total_break_seconds_today),
+      onBreak: Boolean(open),
+      currentBreak: open || null
+    };
+  });
+}
+
+module.exports = {
+  startBreak,
+  endBreak,
+  getStatus,
+  sweepBreakLimitViolations,
+  sweepDayEnd,
+  breakLimitSeconds,
+  adminEditBreak,
+  adminDeleteBreak,
+  adminForceEndBreak,
+  getTeamBreakSummary
+};

@@ -13,16 +13,24 @@ const WORKING_STATUS = 'Working On';
  * one transaction so a crash between the two can never leave a "gap" or
  * a task without a UID.
  */
-async function createTask(data, createdByUserId) {
+async function createTask(data, createdByUserId, createdByRole) {
   if (!data.taskType || !data.relatedTo || !data.assignedUserId) {
     throw Object.assign(
       new Error('Task, Related To, and Assigned are required.'),
       { statusCode: 400 }
     );
   }
-  if (!data.restId || !String(data.restId).trim() || !data.emailSubject || !String(data.emailSubject).trim()) {
+  if (!data.restId || !String(data.restId).trim()) {
     throw Object.assign(
-      new Error('RID and Email Subject are required.'),
+      new Error('RID is required.'),
+      { statusCode: 400 }
+    );
+  }
+  // Master creates/assigns tasks on behalf of the team and may not have an
+  // email subject on hand yet - only regular users are required to supply one.
+  if (createdByRole !== 'master' && (!data.emailSubject || !String(data.emailSubject).trim())) {
+    throw Object.assign(
+      new Error('Email Subject is required.'),
       { statusCode: 400 }
     );
   }
@@ -199,10 +207,22 @@ const FIELD_TO_COLUMN = {
   rawCount: 'raw_count', suggested: 'suggested', sla: 'sla'
 };
 
-async function updateTaskDetails(taskId, updates, userId) {
+async function updateTaskDetails(taskId, updates, userId, userRole) {
   const providedFields = EDITABLE_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(updates, f));
   if (providedFields.length === 0) {
     throw Object.assign(new Error('No editable fields were provided.'), { statusCode: 400 });
+  }
+  // Item 3: Rest ID stays compulsory whenever it's part of the edit; Email
+  // Subject follows the same Master exception used at task creation.
+  if (providedFields.includes('restId') && (!updates.restId || !String(updates.restId).trim())) {
+    throw Object.assign(new Error('Rest ID is required.'), { statusCode: 400 });
+  }
+  if (
+    providedFields.includes('emailSubject') &&
+    userRole !== 'master' &&
+    (!updates.emailSubject || !String(updates.emailSubject).trim())
+  ) {
+    throw Object.assign(new Error('Email Subject is required.'), { statusCode: 400 });
   }
 
   return withTransaction(async (client) => {
@@ -333,12 +353,31 @@ async function getSummary(userId, isMaster) {
     params
   );
   const row = rows[0];
+
+  // Item 5: total time spent working on tasks TODAY specifically (not a
+  // lifetime total) - summed straight from closed Working On sessions,
+  // independent of Today's Working Time (login-based, in activityService).
+  let totalWorkingSeconds = 0;
+  if (userId) {
+    const { rows: sessionRows } = await query(
+      `select coalesce(sum(duration_seconds), 0) as total
+       from status_sessions
+       where user_id = $1
+         and status = 'Working On'
+         and end_time is not null
+         and (start_time at time zone 'Asia/Kolkata')::date = $2`,
+      [userId, todayIST()]
+    );
+    totalWorkingSeconds = Number(sessionRows[0].total);
+  }
+
   return {
     total: Number(row.total),
     workingOn: Number(row.working_on),
     pending: Number(row.pending),
     hold: Number(row.hold),
-    done: Number(row.done)
+    done: Number(row.done),
+    totalWorkingSeconds
   };
 }
 

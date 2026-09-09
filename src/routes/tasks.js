@@ -14,7 +14,7 @@ router.use(authenticate);
  */
 router.post('/', requirePermission('create_task'), async (req, res) => {
   try {
-    const task = await taskService.createTask(req.body, req.user.id);
+    const task = await taskService.createTask(req.body, req.user.id, req.user.role);
     res.status(201).json(task);
   } catch (err) {
     console.error('Create task error:', err);
@@ -147,7 +147,7 @@ router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status
  */
 router.patch('/:id', requirePermission('edit_task_details'), async (req, res) => {
   try {
-    const updated = await taskService.updateTaskDetails(req.params.id, req.body, req.user.id);
+    const updated = await taskService.updateTaskDetails(req.params.id, req.body, req.user.id, req.user.role);
     res.json(updated);
   } catch (err) {
     console.error('Update task details error:', err);
