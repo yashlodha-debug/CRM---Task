@@ -252,93 +252,63 @@ async function updateTaskDetails(taskId, updates, userId, userRole) {
 }
 
 /**
- * Item 2: reassign a task to a different user. If the task is currently
- * "Working On", the open session is closed under the outgoing user - the
- * clock does not silently keep running "owned" by someone the task is no
- * longer assigned to. Work resumes fresh (a new session) only when
- * someone actively sets it to Working On again.
+ * Item 2: "Reassign" a task by creating a brand-new task from the old
+ * one's details, rather than editing the old task in place. This matches
+ * the real workflow: a completed task's client comes back with a follow
+ * up request, and the old task (its original Assign Date, status,
+ * duration, history) must stay exactly as it was for reporting purposes.
  *
- * `fieldUpdates` optionally carries the same editable fields as the New
- * Task / Edit Details forms (task type, related to, exis data, rest id,
- * rest name, email subject, recipes/raw counts) so the reassign flow can
- * double as a quick review-and-correct step, matching what happens on
- * create. Only keys actually present in fieldUpdates are touched -
- * anything omitted keeps its current value untouched. assign_date is
- * always bumped to today (IST) on a reassign, per how the task now
- * effectively restarts under its new owner.
+ * The old task is only ever SELECTed here, never updated - reusing
+ * createTask() guarantees the new task gets its own fresh Task UID and
+ * is synced to the Sheet as a new 'insert' row, so nothing about the old
+ * task's row is touched or overwritten. Any field the caller doesn't
+ * explicitly override falls back to the old task's current value, and
+ * Assign Date is always set to today for the new task regardless.
  */
-async function reassignTask(taskId, newAssignedUserId, userId, comment, fieldUpdates = {}) {
+async function reassignTask(oldTaskId, newAssignedUserId, userId, userRole, comment, fieldUpdates = {}) {
   if (!newAssignedUserId) {
     throw Object.assign(new Error('newAssignedUserId is required.'), { statusCode: 400 });
   }
 
-  const EDITABLE_COLUMNS = {
-    taskType: 'task_type',
-    relatedTo: 'related_to',
-    exisData: 'exis_data',
-    restId: 'rest_id',
-    restName: 'rest_name',
-    emailSubject: 'email_subject',
-    recipesCount: 'recipes_count',
-    rawCount: 'raw_count'
-  };
+  const { rows } = await query(`select * from tasks where id = $1`, [oldTaskId]);
+  const oldTask = rows[0];
+  if (!oldTask) {
+    throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+  }
 
-  return withTransaction(async (client) => {
-    const { rows: taskRows } = await client.query(`select * from tasks where id = $1 for update`, [taskId]);
-    const task = taskRows[0];
-    if (!task) {
-      throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
-    }
+  const pick = (key, column) =>
+    Object.prototype.hasOwnProperty.call(fieldUpdates, key) ? fieldUpdates[key] : oldTask[column];
 
-    if (task.status === WORKING_STATUS) {
-      await client.query(
-        `update status_sessions
-         set end_time = now(), duration_seconds = extract(epoch from (now() - start_time))::int
-         where task_id = $1 and end_time is null`,
-        [taskId]
-      );
-    }
+  const newTask = await createTask(
+    {
+      assignedUserId: newAssignedUserId,
+      taskType: pick('taskType', 'task_type'),
+      relatedTo: pick('relatedTo', 'related_to'),
+      exisData: pick('exisData', 'exis_data'),
+      restId: pick('restId', 'rest_id'),
+      restName: pick('restName', 'rest_name'),
+      emailSubject: pick('emailSubject', 'email_subject'),
+      recipesCount: pick('recipesCount', 'recipes_count'),
+      rawCount: pick('rawCount', 'raw_count'),
+      mailDate: pick('mailDate', 'mail_date'),
+      assignDate: todayIST(), // always today for the new task, per spec
+      status: 'Open',
+      suggested: oldTask.suggested,
+      sla: oldTask.sla
+    },
+    userId,
+    userRole
+  );
 
-    // Recompute the cached total from the sessions themselves, same as
-    // changeStatus does - otherwise the just-closed session's time would
-    // be recorded in status_sessions but never reflected on tasks.duration_seconds.
-    const { rows: durationRows } = await client.query(
-      `select coalesce(sum(duration_seconds), 0) as total
-       from status_sessions
-       where task_id = $1 and status = $2 and end_time is not null`,
-      [taskId, WORKING_STATUS]
-    );
-    const totalDuration = durationRows[0].total;
+  // createTask() already logged "Task created." - add a second entry that
+  // links back to the source task, for anyone reviewing history later.
+  await query(
+    `insert into status_history (task_id, task_uid, user_id, previous_status, new_status, comment)
+     values ($1, $2, $3, $4, $4, $5)`,
+    [newTask.id, newTask.task_uid, userId, newTask.status, `Reassigned from ${oldTask.task_uid}.${comment ? ' ' + comment : ''}`]
+  );
 
-    // Build the set of columns to update dynamically: assigned_user_id,
-    // duration_seconds and assign_date always change; any editable field
-    // actually present in fieldUpdates is added on top of that.
-    const setClauses = ['assigned_user_id = $1', 'duration_seconds = $2', 'assign_date = $3', 'updated_at = now()'];
-    const params = [newAssignedUserId, totalDuration, todayIST()];
-
-    for (const [formKey, column] of Object.entries(EDITABLE_COLUMNS)) {
-      if (Object.prototype.hasOwnProperty.call(fieldUpdates, formKey)) {
-        params.push(fieldUpdates[formKey]);
-        setClauses.push(`${column} = $${params.length}`);
-      }
-    }
-
-    params.push(taskId);
-    const { rows: updatedRows } = await client.query(
-      `update tasks set ${setClauses.join(', ')} where id = $${params.length} returning *`,
-      params
-    );
-    const updatedTask = updatedRows[0];
-
-    await client.query(
-      `insert into status_history (task_id, task_uid, user_id, previous_status, new_status, comment)
-       values ($1, $2, $3, $4, $4, $5)`,
-      [taskId, task.task_uid, userId, task.status, comment || 'Task reassigned.']
-    );
-
-    await enqueueSync(client, taskId, task.task_uid, 'update', updatedTask);
-    return updatedTask;
-  });
+  return newTask;
 }
 
 /**
