@@ -257,11 +257,31 @@ async function updateTaskDetails(taskId, updates, userId, userRole) {
  * clock does not silently keep running "owned" by someone the task is no
  * longer assigned to. Work resumes fresh (a new session) only when
  * someone actively sets it to Working On again.
+ *
+ * `fieldUpdates` optionally carries the same editable fields as the New
+ * Task / Edit Details forms (task type, related to, exis data, rest id,
+ * rest name, email subject, recipes/raw counts) so the reassign flow can
+ * double as a quick review-and-correct step, matching what happens on
+ * create. Only keys actually present in fieldUpdates are touched -
+ * anything omitted keeps its current value untouched. assign_date is
+ * always bumped to today (IST) on a reassign, per how the task now
+ * effectively restarts under its new owner.
  */
-async function reassignTask(taskId, newAssignedUserId, userId, comment) {
+async function reassignTask(taskId, newAssignedUserId, userId, comment, fieldUpdates = {}) {
   if (!newAssignedUserId) {
     throw Object.assign(new Error('newAssignedUserId is required.'), { statusCode: 400 });
   }
+
+  const EDITABLE_COLUMNS = {
+    taskType: 'task_type',
+    relatedTo: 'related_to',
+    exisData: 'exis_data',
+    restId: 'rest_id',
+    restName: 'rest_name',
+    emailSubject: 'email_subject',
+    recipesCount: 'recipes_count',
+    rawCount: 'raw_count'
+  };
 
   return withTransaction(async (client) => {
     const { rows: taskRows } = await client.query(`select * from tasks where id = $1 for update`, [taskId]);
@@ -290,9 +310,23 @@ async function reassignTask(taskId, newAssignedUserId, userId, comment) {
     );
     const totalDuration = durationRows[0].total;
 
+    // Build the set of columns to update dynamically: assigned_user_id,
+    // duration_seconds and assign_date always change; any editable field
+    // actually present in fieldUpdates is added on top of that.
+    const setClauses = ['assigned_user_id = $1', 'duration_seconds = $2', 'assign_date = $3', 'updated_at = now()'];
+    const params = [newAssignedUserId, totalDuration, todayIST()];
+
+    for (const [formKey, column] of Object.entries(EDITABLE_COLUMNS)) {
+      if (Object.prototype.hasOwnProperty.call(fieldUpdates, formKey)) {
+        params.push(fieldUpdates[formKey]);
+        setClauses.push(`${column} = $${params.length}`);
+      }
+    }
+
+    params.push(taskId);
     const { rows: updatedRows } = await client.query(
-      `update tasks set assigned_user_id = $1, duration_seconds = $2, updated_at = now() where id = $3 returning *`,
-      [newAssignedUserId, totalDuration, taskId]
+      `update tasks set ${setClauses.join(', ')} where id = $${params.length} returning *`,
+      params
     );
     const updatedTask = updatedRows[0];
 

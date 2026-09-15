@@ -53,23 +53,34 @@ router.post('/queue/:id/retry', async (req, res) => {
 
 /**
  * POST /api/sync/resync-all
- * Manual "restore Sheet from CRM" tool. Re-queues every task touched in
- * the last 60 days as an 'update', which the existing worker then writes
- * to the Sheet via syncTask() - that function always looks up the row by
- * Task UID first and overwrites it, only appending if the UID is missing
- * entirely. So this is safe to run any number of times: it never creates
- * duplicate rows, and it never reads the Sheet back into the CRM database
- * - this route only ever SELECTs from tasks, it never writes to them.
+ * Manual "restore Sheet from CRM" tool. Body may optionally include
+ * { taskIds: [...] } to resync only specific tasks the user picked;
+ * otherwise it falls back to every task touched in the last 60 days.
+ * Re-queues the chosen tasks as 'update', which the existing worker then
+ * writes to the Sheet via syncTask() - that function always looks up the
+ * row by Task UID first and overwrites it, only appending if the UID is
+ * missing entirely. So this is safe to run any number of times: it never
+ * creates duplicate rows, and it never reads the Sheet back into the CRM
+ * database - this route only ever SELECTs from tasks, it never writes to them.
  */
 router.post('/resync-all', async (req, res) => {
   try {
-    const { rows: tasks } = await query(
-      `select * from tasks
-       where greatest(created_at, updated_at) >= now() - interval '60 days'`
-    );
+    const { taskIds } = req.body || {};
+    let tasks;
+
+    if (Array.isArray(taskIds) && taskIds.length > 0) {
+      const { rows } = await query(`select * from tasks where id = any($1::uuid[])`, [taskIds]);
+      tasks = rows;
+    } else {
+      const { rows } = await query(
+        `select * from tasks
+         where greatest(created_at, updated_at) >= now() - interval '60 days'`
+      );
+      tasks = rows;
+    }
 
     if (tasks.length === 0) {
-      return res.json({ queued: 0, message: 'No tasks found in the last 60 days.' });
+      return res.json({ queued: 0, message: 'No matching tasks found.' });
     }
 
     for (const task of tasks) {

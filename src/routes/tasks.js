@@ -176,8 +176,8 @@ router.patch('/:id/reassign', async (req, res, next) => {
   next();
 }, async (req, res) => {
   try {
-    const { assignedUserId, comment } = req.body;
-    const updated = await taskService.reassignTask(req.params.id, assignedUserId, req.user.id, comment);
+    const { assignedUserId, comment, ...fieldUpdates } = req.body;
+    const updated = await taskService.reassignTask(req.params.id, assignedUserId, req.user.id, comment, fieldUpdates);
     res.json(updated);
   } catch (err) {
     console.error('Reassign task error:', err);
