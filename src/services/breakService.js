@@ -159,8 +159,31 @@ async function sweepBreakLimitViolations() {
  * whose login_date_ist is not today, as a proactive safety net alongside
  * the reactive check already in the auth middleware.
  */
+/**
+ * Closes any login session that's rolled over from a previous IST day
+ * (a safety net cron sweep - normally sessions end via explicit
+ * logout/break-limit). Also closes any break still left open under one
+ * of those sessions: if someone forgot to end a break before this ran,
+ * their break_logs row would otherwise stay open forever - break_end
+ * never getting set - which then silently excludes it from every future
+ * day's "breaks today" / "total break time today" totals while still
+ * showing up as "currently on break" indefinitely. Closing it here,
+ * timestamped to when the sweep actually runs, fixes both.
+ */
 async function sweepDayEnd() {
   const today = todayIST();
+
+  const { rows: closedBreaks } = await query(
+    `update break_logs bl
+     set break_end = now(), duration_seconds = extract(epoch from (now() - bl.break_start))::int
+     from login_sessions ls
+     where bl.login_session_id = ls.id
+       and bl.break_end is null
+       and ls.login_date_ist != $1
+     returning bl.id`,
+    [today]
+  );
+
   const { rows } = await query(
     `update login_sessions
      set logout_time = now(), logout_reason = 'day_end'
@@ -168,6 +191,11 @@ async function sweepDayEnd() {
      returning id`,
     [today]
   );
+
+  if (closedBreaks.length > 0) {
+    console.log(`Day-end sweep also closed ${closedBreaks.length} stale open break(s).`);
+  }
+
   return rows.length;
 }
 
