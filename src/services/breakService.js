@@ -255,23 +255,42 @@ async function adminForceEndBreak(breakId) {
 async function getTeamBreakSummary() {
   const today = todayIST();
 
+  // break_logs and login_sessions are aggregated separately first (each
+  // as one row per user), then joined - joining the two raw tables
+  // directly would fan out into a cross product (every break row paired
+  // with every login row for that user), silently multiplying the break
+  // counts and totals. Aggregating first avoids that entirely.
   const { rows: totals } = await query(
-    `select
+    `with break_agg as (
+       select user_id,
+              count(*) filter (where date_ist = $1) as breaks_today,
+              coalesce(sum(
+                case when date_ist = $1 then
+                  case when break_end is not null then duration_seconds
+                       else extract(epoch from (now() - break_start))::int
+                  end
+                else 0 end
+              ), 0) as total_break_seconds_today
+       from break_logs
+       group by user_id
+     ),
+     login_agg as (
+       select user_id, min(login_time) as first_login_today
+       from login_sessions
+       where login_date_ist = $1
+       group by user_id
+     )
+     select
        u.id as user_id,
        u.full_name,
        u.username,
-       count(bl.id) filter (where bl.date_ist = $1) as breaks_today,
-       coalesce(sum(
-         case when bl.date_ist = $1 then
-           case when bl.break_end is not null then bl.duration_seconds
-                else extract(epoch from (now() - bl.break_start))::int
-           end
-         else 0 end
-       ), 0) as total_break_seconds_today
+       coalesce(break_agg.breaks_today, 0) as breaks_today,
+       coalesce(break_agg.total_break_seconds_today, 0) as total_break_seconds_today,
+       login_agg.first_login_today
      from users u
-     left join break_logs bl on bl.user_id = u.id
+     left join break_agg on break_agg.user_id = u.id
+     left join login_agg on login_agg.user_id = u.id
      where u.role != 'master'
-     group by u.id, u.full_name, u.username
      order by u.full_name asc`,
     [today]
   );
@@ -289,12 +308,66 @@ async function getTeamBreakSummary() {
       userId: row.user_id,
       fullName: row.full_name,
       username: row.username,
+      firstLoginToday: row.first_login_today,
+      loggedInToday: Boolean(row.first_login_today),
       breaksToday: Number(row.breaks_today),
       totalBreakSecondsToday: Number(row.total_break_seconds_today),
       onBreak: Boolean(open),
       currentBreak: open || null
     };
   });
+}
+
+/**
+ * Item 4: date-wise attendance report for Master to export. Builds a
+ * full grid of every active date x every non-master user in the range
+ * (using generate_series), so absent days show up as "Not Available"
+ * rather than being silently missing from the report - the whole point
+ * is to be able to check attendance for each user for each day, not
+ * just see days someone happened to log in.
+ */
+async function getAttendanceReport(startDate, endDate) {
+  const { rows } = await query(
+    `select
+       d::date as date,
+       u.id as user_id,
+       u.full_name,
+       la.first_login,
+       coalesce(ba.breaks_count, 0) as breaks_count,
+       coalesce(ba.total_break_seconds, 0) as total_break_seconds
+     from generate_series($1::date, $2::date, interval '1 day') as d
+     cross join users u
+     left join (
+       select user_id, login_date_ist, min(login_time) as first_login
+       from login_sessions
+       where login_date_ist between $1 and $2
+       group by user_id, login_date_ist
+     ) la on la.user_id = u.id and la.login_date_ist = d::date
+     left join (
+       select user_id, date_ist,
+              count(*) as breaks_count,
+              sum(
+                case when break_end is not null then duration_seconds
+                     else extract(epoch from (now() - break_start))::int
+                end
+              ) as total_break_seconds
+       from break_logs
+       where date_ist between $1 and $2
+       group by user_id, date_ist
+     ) ba on ba.user_id = u.id and ba.date_ist = d::date
+     where u.role != 'master'
+     order by d asc, u.full_name asc`,
+    [startDate, endDate]
+  );
+
+  return rows.map((row) => ({
+    date: row.date,
+    fullName: row.full_name,
+    loginTime: row.first_login,
+    status: row.first_login ? 'Logged In' : 'Not Available',
+    breaksCount: Number(row.breaks_count),
+    totalBreakSeconds: Number(row.total_break_seconds)
+  }));
 }
 
 module.exports = {
@@ -307,5 +380,6 @@ module.exports = {
   adminEditBreak,
   adminDeleteBreak,
   adminForceEndBreak,
-  getTeamBreakSummary
+  getTeamBreakSummary,
+  getAttendanceReport
 };

@@ -6,6 +6,7 @@ const dropdownService = require('../services/dropdownService');
 const activityService = require('../services/activityService');
 const { authenticate } = require('../middleware/auth');
 const { requireMaster } = require('../middleware/permissions');
+const { todayIST } = require('../utils/date');
 
 // Every route here is Master-only, regardless of individual permissions -
 // user management and permission editing are always Master's job.
@@ -198,6 +199,30 @@ router.get('/breaks/today', async (req, res) => {
   } catch (err) {
     console.error('Get team break summary error:', err);
     res.status(500).json({ error: 'Failed to load break summary.' });
+  }
+});
+
+/**
+ * GET /api/admin/attendance-report?start=YYYY-MM-DD&end=YYYY-MM-DD
+ * Item 4: date-wise attendance export. Defaults to the last 30 days if
+ * no range is given. Returns JSON rows - the frontend turns this into a
+ * CSV file, since the browser's auth token can't be attached to a plain
+ * download link.
+ */
+router.get('/attendance-report', async (req, res) => {
+  try {
+    const end = req.query.end || todayIST();
+    const start = req.query.start || (() => {
+      const d = new Date(end);
+      d.setDate(d.getDate() - 29);
+      return d.toISOString().slice(0, 10);
+    })();
+
+    const rows = await breakService.getAttendanceReport(start, end);
+    res.json(rows);
+  } catch (err) {
+    console.error('Get attendance report error:', err);
+    res.status(500).json({ error: 'Failed to load attendance report.' });
   }
 });
 
