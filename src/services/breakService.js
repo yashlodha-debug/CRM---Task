@@ -473,6 +473,48 @@ async function getAttendanceReport(startDate, endDate) {
   }));
 }
 
+/**
+ * Item 2: lets Master start a break on a user's behalf, for when they
+ * forgot to select one themselves. Requires the user to currently be
+ * logged in (finds their active session), and requires they aren't
+ * already on a break. Skips the "must not have a task Working On" check
+ * that a self-service break start enforces - Master overriding on
+ * someone's behalf is a deliberate manual correction, not a normal
+ * button click, so that guardrail doesn't apply here.
+ */
+async function adminStartBreakForUser(userId, breakType) {
+  const validTypes = ['lunch', 'tea', 'short'];
+  if (!validTypes.includes(breakType)) {
+    throw Object.assign(new Error('Invalid break type.'), { statusCode: 400 });
+  }
+
+  const today = todayIST();
+  const { rows: sessionRows } = await query(
+    `select id from login_sessions where user_id = $1 and login_date_ist = $2 and logout_time is null`,
+    [userId, today]
+  );
+  const session = sessionRows[0];
+  if (!session) {
+    throw Object.assign(new Error('This user is not currently logged in.'), { statusCode: 400 });
+  }
+
+  const { rows: openRows } = await query(
+    `select id from break_logs where login_session_id = $1 and break_end is null`,
+    [session.id]
+  );
+  if (openRows.length > 0) {
+    throw Object.assign(new Error('This user is already on a break.'), { statusCode: 400 });
+  }
+
+  const { rows } = await query(
+    `insert into break_logs (user_id, login_session_id, break_type, date_ist)
+     values ($1, $2, $3, $4)
+     returning *`,
+    [userId, session.id, breakType, today]
+  );
+  return rows[0];
+}
+
 module.exports = {
   startBreak,
   endBreak,
@@ -484,6 +526,7 @@ module.exports = {
   adminDeleteBreak,
   adminForceEndBreak,
   adminForceLogoutUser,
+  adminStartBreakForUser,
   getTeamBreakSummary,
   getAttendanceReport
 };

@@ -203,6 +203,22 @@ router.post('/users/:id/force-logout', async (req, res) => {
 });
 
 /**
+ * POST /api/admin/users/:id/start-break
+ * Item 2: Master starts a specific break type on a user's behalf, for
+ * when they forgot to select one themselves.
+ */
+router.post('/users/:id/start-break', async (req, res) => {
+  try {
+    const { breakType } = req.body;
+    const result = await breakService.adminStartBreakForUser(req.params.id, breakType);
+    res.json(result);
+  } catch (err) {
+    console.error('Admin start break error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to start break.' });
+  }
+});
+
+/**
  * GET /api/admin/breaks/today
  * Item 1: team-wide break overview - every non-Master user's break count
  * and total time today, plus whether they're currently on break.
