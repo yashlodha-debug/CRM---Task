@@ -176,7 +176,7 @@ router.delete('/breaks/:id', async (req, res) => {
   }
 });
 
-/** POST /api/admin/breaks/:id/end - end a forgotten break and log the user out. */
+/** POST /api/admin/breaks/:id/end - end a break, without logging the user out. */
 router.post('/breaks/:id/end', async (req, res) => {
   try {
     const result = await breakService.adminForceEndBreak(req.params.id);
@@ -184,6 +184,21 @@ router.post('/breaks/:id/end', async (req, res) => {
   } catch (err) {
     console.error('Force end break error:', err);
     res.status(err.statusCode || 500).json({ error: err.message || 'Failed to end break.' });
+  }
+});
+
+/**
+ * POST /api/admin/users/:id/force-logout
+ * Item 1: Master-triggered logout for the Team Breaks dropdown. Closes
+ * any break still open under the user's active session first.
+ */
+router.post('/users/:id/force-logout', async (req, res) => {
+  try {
+    const result = await breakService.adminForceLogoutUser(req.params.id);
+    res.json(result);
+  } catch (err) {
+    console.error('Force logout error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to log user out.' });
   }
 });
 

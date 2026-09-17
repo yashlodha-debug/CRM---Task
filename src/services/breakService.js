@@ -117,6 +117,18 @@ async function getStatus(userId, loginSessionId) {
  * any break still open) has reached the daily limit, and force-logs-out
  * every open session they currently have.
  */
+/**
+ * Item 2: force-logs-out anyone who has hit today's break limit. This
+ * should only take effect ONCE per user per day - after the enforced
+ * logout, they must be able to log back in and keep working normally
+ * for the rest of the day, even though their cumulative break time for
+ * today is still technically over the limit. Without the "not already
+ * enforced today" check below, this sweep (which runs every minute)
+ * would see that same over-the-limit total on every subsequent login
+ * and immediately force them back out again within a minute - making
+ * the limit effectively lock them out for the rest of the day, which is
+ * not the intended behavior.
+ */
 async function sweepBreakLimitViolations() {
   const limitSeconds = breakLimitSeconds();
   const today = todayIST();
@@ -135,12 +147,31 @@ async function sweepBreakLimitViolations() {
               case when bl.break_end is not null then bl.duration_seconds
                    else extract(epoch from (now() - bl.break_start))::int
               end
-            ), 0) >= $2`,
+            ), 0) >= $2
+       and not exists (
+         select 1 from login_sessions ls
+         where ls.user_id = bl.user_id
+           and ls.login_date_ist = $1
+           and ls.logout_reason = 'break_limit'
+       )`,
     [today, limitSeconds]
   );
 
   let closedCount = 0;
   for (const row of rows) {
+    // Close any break still open under today's active session first -
+    // same fix as the day-end sweep, otherwise it's left open forever.
+    await query(
+      `update break_logs bl
+       set break_end = now(), duration_seconds = extract(epoch from (now() - bl.break_start))::int
+       from login_sessions ls
+       where bl.login_session_id = ls.id
+         and bl.break_end is null
+         and ls.user_id = $1
+         and ls.login_date_ist = $2`,
+      [row.user_id, today]
+    );
+
     const { rows: closed } = await query(
       `update login_sessions
        set logout_time = now(), logout_reason = 'break_limit'
@@ -254,29 +285,62 @@ async function adminDeleteBreak(breakId) {
   return { success: true };
 }
 
+/**
+ * Ends a break immediately, without touching the user's login session -
+ * they stay logged in and simply return to "working" status. (Previously
+ * this always force-logged the user out too; that's now a separate,
+ * explicit action - see adminForceLogoutUser - so Master can choose
+ * exactly which one they want from the Team Breaks dropdown.)
+ */
 async function adminForceEndBreak(breakId) {
-  return withTransaction(async (client) => {
-    const { rows: breakRows } = await client.query(
-      `update break_logs
-       set break_end = now(),
-           duration_seconds = extract(epoch from (now() - break_start))::int
-       where id = $1 and break_end is null
-       returning *`,
-      [breakId]
-    );
-    const brk = breakRows[0];
-    if (!brk) {
-      throw Object.assign(new Error('This break is not currently active.'), { statusCode: 400 });
-    }
+  const { rows: breakRows } = await query(
+    `update break_logs
+     set break_end = now(),
+         duration_seconds = extract(epoch from (now() - break_start))::int
+     where id = $1 and break_end is null
+     returning *`,
+    [breakId]
+  );
+  const brk = breakRows[0];
+  if (!brk) {
+    throw Object.assign(new Error('This break is not currently active.'), { statusCode: 400 });
+  }
+  return { break: brk };
+}
 
+/**
+ * Item 1: Master-triggered logout for a specific user's active session
+ * today. Closes any break still open under that session first (so it's
+ * never left dangling), then ends the session itself.
+ */
+async function adminForceLogoutUser(userId) {
+  const today = todayIST();
+
+  return withTransaction(async (client) => {
     await client.query(
+      `update break_logs bl
+       set break_end = now(), duration_seconds = extract(epoch from (now() - bl.break_start))::int
+       from login_sessions ls
+       where bl.login_session_id = ls.id
+         and bl.break_end is null
+         and ls.user_id = $1
+         and ls.login_date_ist = $2`,
+      [userId, today]
+    );
+
+    const { rows: closed } = await client.query(
       `update login_sessions
        set logout_time = now(), logout_reason = 'master_forced'
-       where id = $1 and logout_time is null`,
-      [brk.login_session_id]
+       where user_id = $1 and login_date_ist = $2 and logout_time is null
+       returning id`,
+      [userId, today]
     );
 
-    return { break: brk, loggedOut: true };
+    if (closed.length === 0) {
+      throw Object.assign(new Error('This user is not currently logged in.'), { statusCode: 400 });
+    }
+
+    return { success: true, sessionsClosed: closed.length };
   });
 }
 
@@ -330,6 +394,16 @@ async function getTeamBreakSummary() {
   );
   const openByUser = new Map(openBreaks.map((b) => [b.user_id, b]));
 
+  // Separate from "loggedInToday" (which just means they logged in at
+  // some point today, even if since logged out) - this tells the
+  // frontend whether there's a session open RIGHT NOW, which decides
+  // whether "Force logout" makes sense to offer.
+  const { rows: activeSessions } = await query(
+    `select user_id from login_sessions where login_date_ist = $1 and logout_time is null`,
+    [today]
+  );
+  const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
+
   return totals.map((row) => {
     const open = openByUser.get(row.user_id);
     return {
@@ -338,6 +412,7 @@ async function getTeamBreakSummary() {
       username: row.username,
       firstLoginToday: row.first_login_today,
       loggedInToday: Boolean(row.first_login_today),
+      isCurrentlyLoggedIn: activeUserIds.has(row.user_id),
       breaksToday: Number(row.breaks_today),
       totalBreakSecondsToday: Number(row.total_break_seconds_today),
       onBreak: Boolean(open),
@@ -408,6 +483,7 @@ module.exports = {
   adminEditBreak,
   adminDeleteBreak,
   adminForceEndBreak,
+  adminForceLogoutUser,
   getTeamBreakSummary,
   getAttendanceReport
 };
