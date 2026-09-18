@@ -121,6 +121,24 @@ router.patch('/:id/status', requirePermission('change_status'), async (req, res)
 });
 
 /**
+ * PATCH /api/tasks/:id/scheduled-call
+ * Item 3: sets (or clears, by sending both as null) a scheduled call.
+ * Body: { callDate: 'YYYY-MM-DD'|null, callTime: 'HH:MM'|null }
+ * Sits alongside Change Status permission-wise since it's offered next
+ * to that same button on the task page.
+ */
+router.patch('/:id/scheduled-call', requirePermission('change_status'), async (req, res) => {
+  try {
+    const { callDate, callTime } = req.body;
+    const updated = await taskService.setScheduledCall(req.params.id, callDate, callTime);
+    res.json(updated);
+  } catch (err) {
+    console.error('Set scheduled call error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to schedule call.' });
+  }
+});
+
+/**
  * PATCH /api/tasks/:id/dashboard-status
  * Body: { dashboardStatus }
  * Separate from the main status field - this is your existing sheet's

@@ -362,6 +362,7 @@ async function getSummary(userId, isMaster) {
   // lifetime total) - summed straight from closed Working On sessions,
   // independent of Today's Working Time (login-based, in activityService).
   let totalWorkingSeconds = 0;
+  let scheduledCalls = 0;
   if (userId) {
     const { rows: sessionRows } = await query(
       `select coalesce(sum(duration_seconds), 0) as total
@@ -373,6 +374,13 @@ async function getSummary(userId, isMaster) {
       [userId, todayIST()]
     );
     totalWorkingSeconds = Number(sessionRows[0].total);
+
+    // Item 3: count of this user's tasks with an upcoming scheduled call.
+    const { rows: callRows } = await query(
+      `select count(*) as total from tasks where assigned_user_id = $1 and scheduled_call_at is not null`,
+      [userId]
+    );
+    scheduledCalls = Number(callRows[0].total);
   }
 
   return {
@@ -381,7 +389,8 @@ async function getSummary(userId, isMaster) {
     pending: Number(row.pending),
     hold: Number(row.hold),
     done: Number(row.done),
-    totalWorkingSeconds
+    totalWorkingSeconds,
+    scheduledCalls
   };
 }
 
@@ -398,9 +407,14 @@ async function listMyTasks(userId, isMaster) {
     `select t.*, u.full_name as assigned_full_name
      from tasks t
      left join users u on u.id = t.assigned_user_id
+     left join dropdown_options d on d.field_name = 'status' and d.value = t.status
      where t.assigned_user_id = $1
      ${monthScopeClause(isMaster)}
-     order by t.created_at desc`,
+     order by
+       (t.scheduled_call_at is null) asc,
+       t.scheduled_call_at asc,
+       coalesce(d.sort_order, 999) asc,
+       t.created_at desc`,
     [userId]
   );
   return rows;
@@ -411,9 +425,10 @@ async function listTeamTasks(isMaster) {
     `select t.*, u.full_name as assigned_full_name
      from tasks t
      left join users u on u.id = t.assigned_user_id
+     left join dropdown_options d on d.field_name = 'status' and d.value = t.status
      where true
      ${monthScopeClause(isMaster)}
-     order by t.created_at desc`
+     order by coalesce(d.sort_order, 999) asc, t.created_at desc`
   );
   return rows;
 }
@@ -481,5 +496,30 @@ module.exports = {
   listMyTasks,
   listTeamTasks,
   getTaskDetail,
-  searchTasks
+  searchTasks,
+  setScheduledCall
 };
+
+/**
+ * Item 3: schedules (or clears, if callDate/callTime are null) a call for
+ * a task. Stored only as tasks.scheduled_call_at, which is deliberately
+ * absent from sheetsSyncService.js's FIELD_TO_HEADER map - so it never
+ * gets written to Google Sheets, CRM-only by design. Combining date and
+ * time with an explicit +05:30 offset means it's stored correctly
+ * regardless of what timezone the database server itself runs in.
+ */
+async function setScheduledCall(taskId, callDate, callTime) {
+  let scheduledCallAt = null;
+  if (callDate && callTime) {
+    scheduledCallAt = `${callDate}T${callTime}:00+05:30`;
+  }
+
+  const { rows } = await query(
+    `update tasks set scheduled_call_at = $1, updated_at = now() where id = $2 returning *`,
+    [scheduledCallAt, taskId]
+  );
+  if (rows.length === 0) {
+    throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
+  }
+  return rows[0];
+}

@@ -62,4 +62,23 @@ async function deleteOption(id) {
   return { success: true };
 }
 
-module.exports = { listAll, listByField, createOption, updateOption, deleteOption };
+/**
+ * Item 4: Master sets the display order for a field's values (e.g.
+ * Status) by dragging/using up-down controls in Dropdown Management.
+ * `orderedIds` is the full list of that field's option ids in the new
+ * order Master wants; sort_order is set to match each one's position.
+ * This same sort_order is what the Status dropdown (StatusChangeModal)
+ * and task list sorting (see taskService.js) both read from, so setting
+ * it here is the one place that controls both.
+ */
+async function reorderOptions(orderedIds) {
+  if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
+    throw Object.assign(new Error('orderedIds must be a non-empty array.'), { statusCode: 400 });
+  }
+  for (let i = 0; i < orderedIds.length; i++) {
+    await query(`update dropdown_options set sort_order = $1 where id = $2`, [i, orderedIds[i]]);
+  }
+  return { success: true };
+}
+
+module.exports = { listAll, listByField, createOption, updateOption, deleteOption, reorderOptions };

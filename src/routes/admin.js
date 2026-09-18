@@ -116,6 +116,21 @@ router.post('/dropdowns', async (req, res) => {
   }
 });
 
+/** PATCH /api/admin/dropdowns/reorder - must come before the :id route below,
+ *  otherwise Express would match "reorder" as an :id first.
+ *  Item 4: saves Master's chosen display order for one field's values.
+ *  Body: { orderedIds: [...] } - the field's option ids, in the new order.
+ */
+router.patch('/dropdowns/reorder', async (req, res) => {
+  try {
+    const result = await dropdownService.reorderOptions(req.body.orderedIds);
+    res.json(result);
+  } catch (err) {
+    console.error('Reorder dropdown options error:', err);
+    res.status(err.statusCode || 500).json({ error: err.message || 'Failed to save order.' });
+  }
+});
+
 /** PATCH /api/admin/dropdowns/:id - edit an option. Body: { value?, sortOrder?, isActive? } */
 router.patch('/dropdowns/:id', async (req, res) => {
   try {
