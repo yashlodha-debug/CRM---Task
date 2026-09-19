@@ -36,6 +36,19 @@ async function startBreak(userId, loginSessionId, breakType) {
     );
   }
 
+  // Guards against a double-click or duplicate request creating two
+  // overlapping break_logs rows for the same session - which would
+  // double-count that overlapping time in every break/working-time total,
+  // the same class of bug that caused overlapping login sessions to
+  // inflate Today's Working Time.
+  const { rows: openRows } = await query(
+    `select id from break_logs where login_session_id = $1 and break_end is null`,
+    [loginSessionId]
+  );
+  if (openRows.length > 0) {
+    throw Object.assign(new Error('You are already on a break.'), { statusCode: 409 });
+  }
+
   const { rows } = await query(
     `insert into break_logs (user_id, login_session_id, break_type, date_ist)
      values ($1, $2, $3, $4)
