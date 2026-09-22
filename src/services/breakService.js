@@ -9,6 +9,7 @@
  */
 const { query, withTransaction } = require('../db/pool');
 const { todayIST } = require('../utils/date');
+const activityService = require('./activityService');
 
 function breakLimitSeconds() {
   const minutes = Number(process.env.BREAK_LIMIT_MINUTES || 55);
@@ -417,6 +418,15 @@ async function getTeamBreakSummary() {
   );
   const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
 
+  // Item 3: reuses activityService.getTodayWorkingSummary() as-is - the
+  // exact same function My Tasks already calls for "Today's working
+  // time" - rather than writing a second copy of that calculation here.
+  // One calculation, used in both places, so they can never drift apart.
+  const summaries = await Promise.all(
+    totals.map((row) => activityService.getTodayWorkingSummary(row.user_id, null))
+  );
+  const workingSecondsByUser = new Map(totals.map((row, i) => [row.user_id, summaries[i].workingSeconds]));
+
   return totals.map((row) => {
     const open = openByUser.get(row.user_id);
     return {
@@ -426,6 +436,7 @@ async function getTeamBreakSummary() {
       firstLoginToday: row.first_login_today,
       loggedInToday: Boolean(row.first_login_today),
       isCurrentlyLoggedIn: activeUserIds.has(row.user_id),
+      todaysWorkingSeconds: workingSecondsByUser.get(row.user_id) || 0,
       breaksToday: Number(row.breaks_today),
       totalBreakSecondsToday: Number(row.total_break_seconds_today),
       onBreak: Boolean(open),

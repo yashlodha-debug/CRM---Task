@@ -485,6 +485,22 @@ async function searchTasks(searchQuery, isMaster) {
   return rows;
 }
 
+/**
+ * Item 2: every task with a scheduled call, across all users, for
+ * Master's view - soonest call first.
+ */
+async function getScheduledCalls() {
+  const { rows } = await query(
+    `select t.id, t.task_uid, t.rest_name, t.email_subject, t.scheduled_call_at, t.status,
+            u.full_name as assigned_full_name
+     from tasks t
+     left join users u on u.id = t.assigned_user_id
+     where t.scheduled_call_at is not null
+     order by t.scheduled_call_at asc`
+  );
+  return rows;
+}
+
 module.exports = {
   createTask,
   changeStatus,
@@ -497,7 +513,8 @@ module.exports = {
   listTeamTasks,
   getTaskDetail,
   searchTasks,
-  setScheduledCall
+  setScheduledCall,
+  getScheduledCalls
 };
 
 /**

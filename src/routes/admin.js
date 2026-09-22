@@ -4,6 +4,7 @@ const router = express.Router();
 const adminService = require('../services/adminService');
 const dropdownService = require('../services/dropdownService');
 const activityService = require('../services/activityService');
+const taskService = require('../services/taskService');
 const { authenticate } = require('../middleware/auth');
 const { requireMaster } = require('../middleware/permissions');
 const { todayIST } = require('../utils/date');
@@ -269,6 +270,22 @@ router.get('/attendance-report', async (req, res) => {
   } catch (err) {
     console.error('Get attendance report error:', err);
     res.status(500).json({ error: 'Failed to load attendance report.' });
+  }
+});
+
+/**
+ * GET /api/admin/scheduled-calls
+ * Item 2: lets Master see every scheduled call across the whole team
+ * (My Tasks only shows a user their own, by design) - task, who it's
+ * assigned to, and the call date/time, soonest first.
+ */
+router.get('/scheduled-calls', async (req, res) => {
+  try {
+    const calls = await taskService.getScheduledCalls();
+    res.json(calls);
+  } catch (err) {
+    console.error('Get scheduled calls error:', err);
+    res.status(500).json({ error: 'Failed to load scheduled calls.' });
   }
 });
 
