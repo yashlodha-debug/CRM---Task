@@ -8,6 +8,7 @@
  * order ever changes.
  */
 const { isConfigured, getSheetsClient } = require('./sheetsClient');
+const { query } = require('../db/pool');
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const TAB_NAME = process.env.GOOGLE_SHEET_TAB_NAME || 'Sheet1';
@@ -151,8 +152,17 @@ async function findRowByTaskUid(sheets, headerMap, taskUid) {
 }
 
 /**
- * Syncs one task's current state to the sheet - updates the existing row
- * if the Task UID is already there, otherwise appends a new row.
+ * Syncs one task's current state to the sheet.
+ *
+ * If we already know which row this task lives on (task.sheet_row_number,
+ * saved from a previous sync), we write straight to that row - no
+ * searching at all, so there's nothing that can race with a Sheets API
+ * read lagging behind a very recent write. We still double-check that
+ * row's Task UID actually matches first, in case someone manually
+ * deleted or reordered rows in the Sheet since we last wrote to it; if
+ * it doesn't match, we fall back to searching by Task UID like before.
+ * Either way, once we know the row, it's saved back to the task so every
+ * future sync for it goes straight there too.
  */
 async function syncTask(task) {
   if (!isConfigured()) {
@@ -163,18 +173,35 @@ async function syncTask(task) {
   const headerMap = await getHeaderMap(sheets);
   const rowArray = buildRowArray(headerMap, task);
   const lastCol = colLetter(rowArray.length - 1);
+  const uidCol = headerMap['Task UID'];
 
-  const existingRow = await findRowByTaskUid(sheets, headerMap, task.task_uid);
+  let targetRow = task.sheet_row_number || null;
 
-  if (existingRow) {
+  if (targetRow && uidCol !== undefined) {
+    const letter = colLetter(uidCol);
+    const check = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${TAB_NAME}!${letter}${targetRow}:${letter}${targetRow}`
+    });
+    const actualUid = check.data.values?.[0]?.[0];
+    if (actualUid !== task.task_uid) {
+      targetRow = null; // stale - someone touched the sheet's rows; fall back to searching
+    }
+  }
+
+  if (!targetRow) {
+    targetRow = await findRowByTaskUid(sheets, headerMap, task.task_uid);
+  }
+
+  if (targetRow) {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `${TAB_NAME}!A${existingRow}:${lastCol}${existingRow}`,
+      range: `${TAB_NAME}!A${targetRow}:${lastCol}${targetRow}`,
       valueInputOption: 'USER_ENTERED',
       requestBody: { values: [rowArray] }
     });
   } else {
-    await sheets.spreadsheets.values.append({
+    const appendResult = await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${TAB_NAME}!A1`,
       valueInputOption: 'USER_ENTERED',
@@ -187,6 +214,13 @@ async function syncTask(task) {
       insertDataOption: 'OVERWRITE',
       requestBody: { values: [rowArray] }
     });
+    const updatedRange = appendResult.data.updates?.updatedRange || '';
+    const match = updatedRange.match(/![A-Za-z]+(\d+)/);
+    targetRow = match ? Number(match[1]) : null;
+  }
+
+  if (targetRow && targetRow !== task.sheet_row_number) {
+    await query(`update tasks set sheet_row_number = $1 where id = $2`, [targetRow, task.id]);
   }
 }
 
