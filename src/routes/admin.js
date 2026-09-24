@@ -289,5 +289,38 @@ router.get('/scheduled-calls', async (req, res) => {
   }
 });
 
+/** GET /api/admin/tasks-summary-all-month - Master Dashboard item 1. */
+router.get('/tasks-summary-all-month', async (req, res) => {
+  try {
+    const summary = await taskService.getAllUsersThisMonthSummary();
+    res.json(summary);
+  } catch (err) {
+    console.error('Get all-users-this-month summary error:', err);
+    res.status(500).json({ error: 'Failed to load summary.' });
+  }
+});
+
+/** GET /api/admin/team-activity - Master Dashboard item 2. */
+router.get('/team-activity', async (req, res) => {
+  try {
+    const rows = await taskService.getTeamActivityOverview();
+    res.json(rows);
+  } catch (err) {
+    console.error('Get team activity overview error:', err);
+    res.status(500).json({ error: 'Failed to load team activity.' });
+  }
+});
+
+/** GET /api/admin/category-breakdown - Master Dashboard item 3. */
+router.get('/category-breakdown', async (req, res) => {
+  try {
+    const rows = await taskService.getCategoryBreakdown();
+    res.json(rows);
+  } catch (err) {
+    console.error('Get category breakdown error:', err);
+    res.status(500).json({ error: 'Failed to load category breakdown.' });
+  }
+});
+
 module.exports = router;
 

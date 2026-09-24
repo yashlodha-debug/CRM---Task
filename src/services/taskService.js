@@ -5,6 +5,7 @@
 const { query, withTransaction } = require('../db/pool');
 const { generateTaskUid } = require('../utils/taskUid');
 const { todayIST } = require('../utils/date');
+const activityService = require('./activityService');
 
 const WORKING_STATUS = 'Working On';
 
@@ -350,7 +351,8 @@ async function getSummary(userId, isMaster) {
        count(*) filter (where status = 'Working On') as working_on,
        count(*) filter (where status = 'Pending') as pending,
        count(*) filter (where status = 'Hold') as hold,
-       count(*) filter (where status = 'Done') as done
+       count(*) filter (where status = 'Done') as done,
+       count(*) filter (where status = 'Open') as open
      from tasks t
      ${whereClause}
      ${monthScopeClause(isMaster)}`,
@@ -389,6 +391,7 @@ async function getSummary(userId, isMaster) {
     pending: Number(row.pending),
     hold: Number(row.hold),
     done: Number(row.done),
+    open: Number(row.open),
     totalWorkingSeconds,
     scheduledCalls
   };
@@ -514,7 +517,10 @@ module.exports = {
   getTaskDetail,
   searchTasks,
   setScheduledCall,
-  getScheduledCalls
+  getScheduledCalls,
+  getAllUsersThisMonthSummary,
+  getTeamActivityOverview,
+  getCategoryBreakdown
 };
 
 /**
@@ -539,4 +545,137 @@ async function setScheduledCall(taskId, callDate, callTime) {
     throw Object.assign(new Error('Task not found.'), { statusCode: 404 });
   }
   return rows[0];
+}
+
+/**
+ * Master Dashboard, item 1: the 6 summary cards on My Tasks, but for
+ * Master specifically - every user's tasks, always scoped to the
+ * current month (unlike monthScopeClause(isMaster), which deliberately
+ * skips the month filter entirely for Master everywhere else in the
+ * app - e.g. Team Tasks' full list stays untouched). This is a brand
+ * new, separate query so nothing about that existing behavior changes;
+ * it only powers this one new "All This Month Tasks" view.
+ */
+async function getAllUsersThisMonthSummary() {
+  const { rows } = await query(
+    `select
+       count(*) as total,
+       count(*) filter (where status = 'Working On') as working_on,
+       count(*) filter (where status = 'Pending') as pending,
+       count(*) filter (where status = 'Hold') as hold,
+       count(*) filter (where status = 'Done') as done,
+       count(*) filter (where status = 'Open') as open
+     from tasks t
+     where (t.created_at at time zone 'Asia/Kolkata') >= date_trunc('month', now() at time zone 'Asia/Kolkata')
+        or t.status = 'Working On'`
+  );
+  const row = rows[0];
+
+  const { rows: callRows } = await query(
+    `select count(*) as total from tasks where scheduled_call_at is not null`
+  );
+
+  return {
+    total: Number(row.total),
+    workingOn: Number(row.working_on),
+    pending: Number(row.pending),
+    hold: Number(row.hold),
+    done: Number(row.done),
+    open: Number(row.open),
+    scheduledCalls: Number(callRows[0].total)
+  };
+}
+
+/**
+ * Master Dashboard, item 2: one row per employee for the "Team Today's
+ * Activity" table. Reuses getSummary(userId, false) exactly as-is for
+ * each employee's Done/Working On/Pending/Open/Total counts and their
+ * "Total Working Time (All Tasks)" figure - that's the very same
+ * calculation My Tasks already shows that employee, not a new one - and
+ * reuses activityService.getTodayWorkingSummary() the same way the Team
+ * Breaks page already does, for Today's Working Time. The only genuinely
+ * new piece here is "currently logged in right now", a simple direct
+ * check against today's login sessions.
+ */
+async function getTeamActivityOverview() {
+  const { rows: users } = await query(
+    `select id, full_name from users where role != 'master' order by full_name asc`
+  );
+
+  const today = todayIST();
+  const { rows: activeSessions } = await query(
+    `select user_id from login_sessions where login_date_ist = $1 and logout_time is null`,
+    [today]
+  );
+  const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
+
+  const rows = await Promise.all(
+    users.map(async (u) => {
+      const summary = await getSummary(u.id, false);
+      const todaySummary = await activityService.getTodayWorkingSummary(u.id, null);
+      return {
+        userId: u.id,
+        fullName: u.full_name,
+        isCurrentlyLoggedIn: activeUserIds.has(u.id),
+        done: summary.done,
+        workingOn: summary.workingOn,
+        pending: summary.pending,
+        open: summary.open,
+        total: summary.total,
+        todaysWorkingSeconds: todaySummary.workingSeconds,
+        totalWorkingSeconds: summary.totalWorkingSeconds
+      };
+    })
+  );
+
+  return rows;
+}
+
+/**
+ * Master Dashboard, item 3: per-employee, per-category task counts for
+ * the current month (same month-scoping rule as items 1 and 2 above -
+ * a fresh, dedicated query, not a change to monthScopeClause itself).
+ * Each cell needs both a total and a done count, so callers can render
+ * it as "total/done".
+ */
+async function getCategoryBreakdown() {
+  const categories = ['Recipe & Material', 'Raw material', 'Other'];
+
+  const { rows } = await query(
+    `select
+       u.id as user_id,
+       u.full_name,
+       t.related_to,
+       count(t.id) as total,
+       count(t.id) filter (where t.status = 'Done') as done
+     from users u
+     left join tasks t
+       on t.assigned_user_id = u.id
+       and t.related_to = any($1)
+       and ((t.created_at at time zone 'Asia/Kolkata') >= date_trunc('month', now() at time zone 'Asia/Kolkata')
+            or t.status = 'Working On')
+     where u.role != 'master'
+     group by u.id, u.full_name, t.related_to
+     order by u.full_name asc`,
+    [categories]
+  );
+
+  const byUser = new Map();
+  for (const row of rows) {
+    if (!byUser.has(row.user_id)) {
+      byUser.set(row.user_id, {
+        userId: row.user_id,
+        fullName: row.full_name,
+        categories: { 'Recipe & Material': { total: 0, done: 0 }, 'Raw material': { total: 0, done: 0 }, Other: { total: 0, done: 0 } },
+        totalDone: 0
+      });
+    }
+    if (row.related_to) {
+      const entry = byUser.get(row.user_id);
+      entry.categories[row.related_to] = { total: Number(row.total), done: Number(row.done) };
+      entry.totalDone += Number(row.done);
+    }
+  }
+
+  return Array.from(byUser.values());
 }
