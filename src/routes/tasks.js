@@ -9,6 +9,28 @@ const { query } = require('../db/pool');
 router.use(authenticate);
 
 /**
+ * View-only rule for other people's tasks: Master can modify any task; a
+ * normal user can only modify a task assigned to them. Enforced here on
+ * the server (not just by hiding buttons in the UI), so calling the API
+ * directly can't get around it. Reads (GET routes) are unaffected -
+ * everyone can still view any task.
+ */
+async function requireTaskOwnerOrMaster(req, res, next) {
+  try {
+    if (req.user.role === 'master') return next();
+    const { rows } = await query('select assigned_user_id from tasks where id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Task not found.' });
+    if (rows[0].assigned_user_id !== req.user.id) {
+      return res.status(403).json({ error: "This task is assigned to someone else - you can view it but not edit it." });
+    }
+    next();
+  } catch (err) {
+    console.error('Task ownership check error:', err);
+    res.status(500).json({ error: 'Failed to verify task ownership.' });
+  }
+}
+
+/**
  * POST /api/tasks
  * Creates a new task. Requires the 'create_task' permission.
  */
@@ -106,7 +128,7 @@ router.get('/:id', async (req, res) => {
  * The comment is mandatory - enforced in taskService, not just here,
  * so it can never be bypassed by calling the API directly.
  */
-router.patch('/:id/status', requirePermission('change_status'), async (req, res) => {
+router.patch('/:id/status', requirePermission('change_status'), requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const { newStatus, comment } = req.body;
     if (!newStatus) {
@@ -127,7 +149,7 @@ router.patch('/:id/status', requirePermission('change_status'), async (req, res)
  * Sits alongside Change Status permission-wise since it's offered next
  * to that same button on the task page.
  */
-router.patch('/:id/scheduled-call', requirePermission('change_status'), async (req, res) => {
+router.patch('/:id/scheduled-call', requirePermission('change_status'), requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const { callDate, callTime } = req.body;
     const updated = await taskService.setScheduledCall(req.params.id, callDate, callTime);
@@ -144,7 +166,7 @@ router.patch('/:id/scheduled-call', requirePermission('change_status'), async (r
  * Separate from the main status field - this is your existing sheet's
  * "Dashboard Status" column (Done / Client side hold / Close / Under Process).
  */
-router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status'), async (req, res) => {
+router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status'), requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const { dashboardStatus } = req.body;
     if (!dashboardStatus) {
@@ -163,7 +185,7 @@ router.patch('/:id/dashboard-status', requirePermission('change_dashboard_status
  * Item 2: edit general task details (everything except status/assignment).
  * Requires the 'edit_task_details' permission.
  */
-router.patch('/:id', requirePermission('edit_task_details'), async (req, res) => {
+router.patch('/:id', requirePermission('edit_task_details'), requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const updated = await taskService.updateTaskDetails(req.params.id, req.body, req.user.id, req.user.role);
     res.json(updated);
@@ -192,7 +214,7 @@ router.patch('/:id/reassign', async (req, res, next) => {
     return res.status(403).json({ error: 'You don\'t have permission to reassign tasks.' });
   }
   next();
-}, async (req, res) => {
+}, requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const { assignedUserId, comment, ...fieldUpdates } = req.body;
     const newTask = await taskService.reassignTask(req.params.id, assignedUserId, req.user.id, req.user.role, comment, fieldUpdates);
@@ -207,7 +229,7 @@ router.patch('/:id/reassign', async (req, res, next) => {
  * DELETE /api/tasks/:id
  * Item 2: permanently delete a task. Requires the 'delete_task' permission.
  */
-router.delete('/:id', requirePermission('delete_task'), async (req, res) => {
+router.delete('/:id', requirePermission('delete_task'), requireTaskOwnerOrMaster, async (req, res) => {
   try {
     const result = await taskService.deleteTask(req.params.id);
     res.json(result);

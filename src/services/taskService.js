@@ -136,7 +136,11 @@ async function changeStatus(taskId, newStatus, comment, userId) {
       await client.query(
         `insert into status_sessions (task_id, task_uid, user_id, status, start_time)
          values ($1, $2, $3, $4, now())`,
-        [taskId, task.task_uid, userId, WORKING_STATUS]
+        // Credit the session to whoever the task is assigned to. For a
+        // user changing their own task that's the same person as before;
+        // when Master changes status on someone else's task, working time
+        // still lands on that employee instead of on Master.
+        [taskId, task.task_uid, task.assigned_user_id || userId, WORKING_STATUS]
       );
     }
 
@@ -210,7 +214,8 @@ const FIELD_TO_COLUMN = {
 
 async function updateTaskDetails(taskId, updates, userId, userRole) {
   const providedFields = EDITABLE_FIELDS.filter((f) => Object.prototype.hasOwnProperty.call(updates, f));
-  if (providedFields.length === 0) {
+  const assigneeOnlyByMaster = userRole === 'master' && Object.prototype.hasOwnProperty.call(updates, 'assignedUserId');
+  if (providedFields.length === 0 && !assigneeOnlyByMaster) {
     throw Object.assign(new Error('No editable fields were provided.'), { statusCode: 400 });
   }
   // Item 3: Rest ID stays compulsory whenever it's part of the edit; Email
@@ -226,12 +231,51 @@ async function updateTaskDetails(taskId, updates, userId, userRole) {
     throw Object.assign(new Error('Email Subject is required.'), { statusCode: 400 });
   }
 
+  // Master-only: change who the task is assigned to, in place (this is
+  // different from Reassign, which creates a separate new task).
+  const changingAssignee = userRole === 'master' && Object.prototype.hasOwnProperty.call(updates, 'assignedUserId');
+  if (changingAssignee && !updates.assignedUserId) {
+    throw Object.assign(new Error('Assigned user cannot be empty.'), { statusCode: 400 });
+  }
+
   return withTransaction(async (client) => {
+    if (changingAssignee) {
+      const { rows: current } = await client.query(
+        `select assigned_user_id, status from tasks where id = $1 for update`,
+        [taskId]
+      );
+      if (current[0] && current[0].assigned_user_id !== updates.assignedUserId) {
+        // If the clock is running, stop it under the outgoing employee so
+        // their working time is recorded correctly and the timer doesn't
+        // silently keep running for someone the task no longer belongs to.
+        if (current[0].status === WORKING_STATUS) {
+          await client.query(
+            `update status_sessions
+             set end_time = now(), duration_seconds = extract(epoch from (now() - start_time))::int
+             where task_id = $1 and end_time is null`,
+            [taskId]
+          );
+        }
+        const { rows: durationRows } = await client.query(
+          `select coalesce(sum(duration_seconds), 0) as total
+           from status_sessions where task_id = $1 and status = $2 and end_time is not null`,
+          [taskId, WORKING_STATUS]
+        );
+        await client.query(
+          `update tasks set assigned_user_id = $1, duration_seconds = $2 where id = $3`,
+          [updates.assignedUserId, durationRows[0].total, taskId]
+        );
+      }
+    }
+
+    // updated_at is always part of the SET list, so an edit that only
+    // changed the assignee (no other fields) is still a valid statement.
     const setClauses = providedFields.map((f, i) => `${FIELD_TO_COLUMN[f]} = $${i + 1}`);
+    setClauses.push('updated_at = now()');
     const values = providedFields.map((f) => updates[f]);
 
     const { rows } = await client.query(
-      `update tasks set ${setClauses.join(', ')}, updated_at = now()
+      `update tasks set ${setClauses.join(', ')}
        where id = $${providedFields.length + 1}
        returning *`,
       [...values, taskId]
