@@ -34,10 +34,59 @@ const FIELD_TO_HEADER = {
   last_comment: 'Comment',
   suggested: 'Suggested',
   sla: 'SLA',
-  task_uid: 'Task UID'
+  task_uid: 'Task UID',
+  // Optional text marker - only written if the sheet has a "Reassigned"
+  // column in row 1; silently skipped otherwise (see buildRowArray).
+  is_reassigned: 'Reassigned'
 };
 
 let headerCache = null;
+let sheetIdCache = null;
+
+// Light orange - clearly different from the plain/white rows.
+const REASSIGNED_ROW_COLOR = { red: 1, green: 0.85, blue: 0.6 };
+
+/** Numeric sheetId (gid) of the configured tab - needed for formatting calls. */
+async function getSheetId(sheets) {
+  if (sheetIdCache !== null) return sheetIdCache;
+  const res = await sheets.spreadsheets.get({
+    spreadsheetId: SHEET_ID,
+    fields: 'sheets.properties(sheetId,title)'
+  });
+  const match = (res.data.sheets || []).find((s) => s.properties.title === TAB_NAME);
+  if (!match) throw new Error(`Tab "${TAB_NAME}" not found in the Google Sheet.`);
+  sheetIdCache = match.properties.sheetId;
+  return sheetIdCache;
+}
+
+/**
+ * Colours one row's background. Only the background of that single row is
+ * touched (no values, borders, dropdowns or other formatting), and it is
+ * idempotent - running it again just re-applies the same colour.
+ */
+async function highlightRow(sheets, rowNumber, width) {
+  const sheetId = await getSheetId(sheets);
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: SHEET_ID,
+    requestBody: {
+      requests: [
+        {
+          repeatCell: {
+            range: {
+              sheetId,
+              startRowIndex: rowNumber - 1,
+              endRowIndex: rowNumber,
+              startColumnIndex: 0,
+              endColumnIndex: width
+            },
+            cell: { userEnteredFormat: { backgroundColor: REASSIGNED_ROW_COLOR } },
+            fields: 'userEnteredFormat.backgroundColor'
+          }
+        }
+      ]
+    }
+  });
+}
 
 async function getHeaderMap(sheets) {
   if (headerCache) return headerCache;
@@ -101,7 +150,8 @@ const FIELD_FORMATTERS = {
   mail_date: formatDateOnly,
   assign_date: formatDateOnly,
   start_time: formatTimeOnly,
-  end_time: formatTimeOnly
+  end_time: formatTimeOnly,
+  is_reassigned: (v) => (v === true ? 'Yes' : '')
 };
 
 // Fields forced to plain text (a leading apostrophe tells Sheets "store
@@ -219,14 +269,25 @@ async function syncTask(task) {
     targetRow = match ? Number(match[1]) : null;
   }
 
+  // Save the row number FIRST, so even if the highlight call below fails and
+  // this queue item is retried, the retry writes to this same row instead of
+  // searching/appending again - that is what keeps a retry from ever creating
+  // a duplicate row.
   if (targetRow && targetRow !== task.sheet_row_number) {
     await query(`update tasks set sheet_row_number = $1 where id = $2`, [targetRow, task.id]);
+  }
+
+  // Reassigned tasks get a highlighted row. Normal tasks are never touched
+  // here, so existing sheet formatting is left exactly as it is.
+  if (targetRow && task.is_reassigned === true) {
+    await highlightRow(sheets, targetRow, rowArray.length);
   }
 }
 
 /** Clears the cached header row - call this if you edit the sheet's headers. */
 function clearHeaderCache() {
   headerCache = null;
+  sheetIdCache = null;
 }
 
 module.exports = { syncTask, clearHeaderCache };

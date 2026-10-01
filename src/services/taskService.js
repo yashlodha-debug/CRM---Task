@@ -14,7 +14,7 @@ const WORKING_STATUS = 'Working On';
  * one transaction so a crash between the two can never leave a "gap" or
  * a task without a UID.
  */
-async function createTask(data, createdByUserId, createdByRole) {
+async function createTask(data, createdByUserId, createdByRole, internal = {}) {
   if (!data.taskType || !data.relatedTo || !data.assignedUserId) {
     throw Object.assign(
       new Error('Task, Related To, and Assigned are required.'),
@@ -48,9 +48,9 @@ async function createTask(data, createdByUserId, createdByRole) {
          task_uid, mail_date, assign_date, assigned_user_id, task_type,
          related_to, exis_data, rest_id, rest_name, email_subject,
          recipes_count, raw_count, status, dashboard_status,
-         suggested, sla, created_by
+         suggested, sla, created_by, is_reassigned, reassigned_from_task_uid
        ) values (
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
        ) returning *`,
       [
         taskUid,
@@ -69,7 +69,10 @@ async function createTask(data, createdByUserId, createdByRole) {
         data.dashboardStatus || null,
         data.suggested || null,
         data.sla || null,
-        createdByUserId
+        createdByUserId,
+        // Only reassignTask() sets these; every normal task stays false/null.
+        internal.isReassigned === true,
+        internal.isReassigned === true ? (internal.reassignedFromUid || null) : null
       ]
     );
 
@@ -342,7 +345,11 @@ async function reassignTask(oldTaskId, newAssignedUserId, userId, userRole, comm
       sla: oldTask.sla
     },
     userId,
-    userRole
+    userRole,
+    // Passed as a separate internal argument (not part of the request body)
+    // so the flag can only ever be set by this function. Label only - lets
+    // the CRM/Sheet highlight it and the dashboard count it.
+    { isReassigned: true, reassignedFromUid: oldTask.task_uid }
   );
 
   // createTask() already logged "Task created." - add a second entry that
@@ -653,6 +660,18 @@ async function getTeamActivityOverview() {
   );
   const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
 
+  // Reassigned = tasks created via Reassign Task whose Assign Date is today
+  // (IST). One grouped query for the whole team; it only reads, and does not
+  // feed into Done/Working/Pending/Open/Total, which are unchanged.
+  const { rows: reassignedRows } = await query(
+    `select assigned_user_id, count(*)::int as cnt
+     from tasks
+     where is_reassigned = true and assign_date = $1
+     group by assigned_user_id`,
+    [today]
+  );
+  const reassignedByUser = new Map(reassignedRows.map((r) => [r.assigned_user_id, r.cnt]));
+
   const rows = await Promise.all(
     users.map(async (u) => {
       const summary = await getSummary(u.id, false);
@@ -665,6 +684,7 @@ async function getTeamActivityOverview() {
         workingOn: summary.workingOn,
         pending: summary.pending,
         open: summary.open,
+        reassigned: reassignedByUser.get(u.id) || 0,
         total: summary.total,
         todaysWorkingSeconds: todaySummary.workingSeconds,
         totalWorkingSeconds: summary.totalWorkingSeconds
