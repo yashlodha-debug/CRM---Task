@@ -660,13 +660,17 @@ async function getTeamActivityOverview() {
   );
   const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
 
-  // Reassigned = tasks created via Reassign Task whose Assign Date is today
-  // (IST). One grouped query for the whole team; it only reads, and does not
-  // feed into Done/Working/Pending/Open/Total, which are unchanged.
+  // Reassigned = tasks created via Reassign Task whose Assign Date falls in
+  // the CURRENT MONTH (IST), so the count builds up through the month and
+  // starts again from 0 on the 1st. One grouped query for the whole team; it
+  // only reads, and does not feed into Done/Working/Pending/Open/Total, which
+  // are unchanged.
   const { rows: reassignedRows } = await query(
     `select assigned_user_id, count(*)::int as cnt
      from tasks
-     where is_reassigned = true and assign_date = $1
+     where is_reassigned = true
+       and assign_date >= date_trunc('month', $1::date)
+       and assign_date <  date_trunc('month', $1::date) + interval '1 month'
      group by assigned_user_id`,
     [today]
   );
