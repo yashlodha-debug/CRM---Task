@@ -456,12 +456,12 @@ async function getTeamBreakSummary() {
 async function getAttendanceReport(startDate, endDate) {
   const { rows } = await query(
     `select
-       to_char(d::date, 'YYYY-MM-DD') as date,
+       d::date as date,
        u.id as user_id,
        u.full_name,
        la.first_login,
        la.last_logout,
-       ((la.last_logout at time zone 'Asia/Kolkata')::date = d::date) as logout_same_day,
+       la.has_open_session,
        coalesce(ba.breaks_count, 0) as breaks_count,
        coalesce(ba.total_break_seconds, 0) as total_break_seconds
      from generate_series($1::date, $2::date, interval '1 day') as d
@@ -469,13 +469,8 @@ async function getAttendanceReport(startDate, endDate) {
      left join (
        select user_id, login_date_ist,
               min(login_time) as first_login,
-              -- Logout time of the LATEST session that day (by login time),
-              -- not the largest logout_time: if someone logged out for lunch
-              -- and is back in a newer session that hasn't ended, the day has
-              -- no logout yet - an earlier session's logout must not be shown
-              -- as if it were their final one. array_agg keeps NULLs, so a
-              -- still-open latest session correctly comes through as NULL.
-              (array_agg(logout_time order by login_time desc))[1] as last_logout
+              max(logout_time) as last_logout,
+              bool_or(logout_time is null) as has_open_session
        from login_sessions
        where login_date_ist between $1 and $2
        group by user_id, login_date_ist
@@ -501,12 +496,10 @@ async function getAttendanceReport(startDate, endDate) {
     date: row.date,
     fullName: row.full_name,
     loginTime: row.first_login,
-    logoutTime: row.last_logout,
-    // Logged in that day, but the day's latest session has no logout yet.
-    stillLoggedIn: Boolean(row.first_login) && !row.last_logout,
-    // False when the session was closed after midnight (e.g. the automatic
-    // end-of-day logout) so the export can show the date, not just a time.
-    logoutOnSameDay: row.logout_same_day,
+    // Logout Time = the day's last logout. If any session that day is still
+    // open the user hasn't logged out yet, so there is no logout time.
+    logoutTime: row.has_open_session ? null : row.last_logout,
+    stillLoggedIn: Boolean(row.first_login && row.has_open_session),
     status: row.first_login ? 'Logged In' : 'Not Available',
     breaksCount: Number(row.breaks_count),
     totalBreakSeconds: Number(row.total_break_seconds)
