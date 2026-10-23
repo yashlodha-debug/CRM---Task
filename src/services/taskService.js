@@ -660,6 +660,20 @@ async function getTeamActivityOverview() {
   );
   const activeUserIds = new Set(activeSessions.map((s) => s.user_id));
 
+  // Users who are logged in right now AND have an open (not yet ended)
+  // break. Read-only and additive: it only feeds the new `isOnBreak`
+  // flag used for the "On Break" Login Status; nothing else uses it.
+  const { rows: onBreakRows } = await query(
+    `select distinct ls.user_id
+     from break_logs bl
+     join login_sessions ls on ls.id = bl.login_session_id
+     where bl.break_end is null
+       and ls.logout_time is null
+       and ls.login_date_ist = $1`,
+    [today]
+  );
+  const onBreakUserIds = new Set(onBreakRows.map((r) => r.user_id));
+
   // Reassigned = tasks created via Reassign Task whose Assign Date is today
   // (IST). One grouped query for the whole team; it only reads, and does not
   // feed into Done/Working/Pending/Open/Total, which are unchanged.
@@ -680,6 +694,7 @@ async function getTeamActivityOverview() {
         userId: u.id,
         fullName: u.full_name,
         isCurrentlyLoggedIn: activeUserIds.has(u.id),
+        isOnBreak: activeUserIds.has(u.id) && onBreakUserIds.has(u.id),
         done: summary.done,
         workingOn: summary.workingOn,
         pending: summary.pending,
