@@ -412,18 +412,45 @@ async function getSummary(userId, isMaster) {
   const row = rows[0];
 
   // Item 5: total time spent working on tasks TODAY specifically (not a
-  // lifetime total) - summed straight from closed Working On sessions,
-  // independent of Today's Working Time (login-based, in activityService).
+  // lifetime total), independent of Today's Working Time (login-based, in
+  // activityService). Closed Working On sessions count their saved
+  // duration, exactly as before. A session that is still open (task
+  // currently Working On) now also counts its running time, so the total
+  // grows live instead of jumping only when the task leaves Working On.
+  // While the user is logged in, an open session runs up to now(); if they
+  // are logged out (e.g. they left a task on Working On), it stops at
+  // their last logout today rather than ticking on while nobody is there.
   let totalWorkingSeconds = 0;
   let scheduledCalls = 0;
   if (userId) {
     const { rows: sessionRows } = await query(
-      `select coalesce(sum(duration_seconds), 0) as total
-       from status_sessions
-       where user_id = $1
-         and status = 'Working On'
-         and end_time is not null
-         and (start_time at time zone 'Asia/Kolkata')::date = $2`,
+      `select coalesce(sum(
+                case
+                  when ss.end_time is not null then ss.duration_seconds
+                  else greatest(
+                    extract(epoch from (
+                      coalesce(
+                        case
+                          when exists (
+                            select 1 from login_sessions ls
+                            where ls.user_id = $1 and ls.login_date_ist = $2 and ls.logout_time is null
+                          ) then now()
+                          else (
+                            select max(ls.logout_time) from login_sessions ls
+                            where ls.user_id = $1 and ls.login_date_ist = $2
+                          )
+                        end,
+                        now()
+                      ) - ss.start_time
+                    )),
+                    0
+                  )::int
+                end
+              ), 0) as total
+       from status_sessions ss
+       where ss.user_id = $1
+         and ss.status = 'Working On'
+         and (ss.start_time at time zone 'Asia/Kolkata')::date = $2`,
       [userId, todayIST()]
     );
     totalWorkingSeconds = Number(sessionRows[0].total);
